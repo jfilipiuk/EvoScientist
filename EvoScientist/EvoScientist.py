@@ -762,6 +762,17 @@ def _get_default_middleware(
             )
         )
 
+    # Stale-todos observability — main agent only. Logs whenever the agent
+    # ends a turn with todos still in `in_progress` or `pending`. Pure
+    # observer; no behavior change. See
+    # `notes/todos-stale-after-turn-end.md` for the symptom we're tracking.
+    if not for_async_subagent:
+        from .middleware.stale_todos_metric import (
+            create_stale_todos_metric_middleware,
+        )
+
+        mw.append(create_stale_todos_metric_middleware())
+
     if cfg.enable_ask_user and not cfg.auto_mode and not for_async_subagent:
         from .middleware.ask_user import AskUserMiddleware
 
