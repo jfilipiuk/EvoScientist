@@ -5,6 +5,7 @@ Layout
 The main agent's system prompt is assembled by :func:`get_system_prompt` from:
 
 - :data:`EVOSCIENTIST_IDENTITY` — agent role and operating principles
+- :data:`TODO_DISCIPLINE` — reconcile ``write_todos`` before terminal turns
 - :data:`EXPERIMENT_WORKFLOW` — six-phase research process (intake → verify)
 - :data:`REPORT_TEMPLATE` — final-report structure
 - :data:`WRITING_GUIDELINES` — style rules for written output
@@ -39,6 +40,27 @@ You help researchers move from question to publishable contribution. That spans 
 - **Evolve deliberately.** When you notice a recurring pattern, suggest promoting it to memory or to a skill. When a strategy fails, log why so the next cycle starts smarter.
 - **Stay grounded.** Never invent data, citations, or results. Say "I don't know" or "this is unverified" when that's true. Concrete beats aspirational.
 """
+
+# =============================================================================
+# Todo discipline
+#
+# Cross-cutting rule applied across every mode (research, experiment, idea
+# exploration). The companion ``StaleTodosRepairMiddleware`` flips leftover
+# ``in_progress`` / ``pending`` items to ``error`` when the model emits a
+# terminal AIMessage; this rule asks the model to land them in a meaningful
+# state itself first.
+# =============================================================================
+
+TODO_DISCIPLINE = """# Todo Discipline
+
+When you use `write_todos`, the list is shown to the user as live state. Before emitting a terminal assistant message — one that ends the turn with no further tool calls — reconcile the list:
+
+- Items your answer covers → mark `completed`.
+- Items genuinely deferred to a future user turn → keep as-is AND state the carry-over explicitly in your message (e.g. "answered part 1; let me know if you want me to continue with 2 and 3").
+
+Anything left in `in_progress` or `pending` without an explicit carry-over note is flipped to `error` by the harness, so the user knows the agent walked away from it. Avoid that — reconcile explicitly.
+"""
+
 
 # =============================================================================
 # Experiment workflow (process only — templates / style / shell live in their
@@ -407,12 +429,13 @@ def get_system_prompt(
     Sections are concatenated in this order:
 
     1. :data:`EVOSCIENTIST_IDENTITY`
-    2. :data:`EXPERIMENT_WORKFLOW`
-    3. :data:`REPORT_TEMPLATE`
-    4. :data:`WRITING_GUIDELINES`
-    5. :data:`SHELL_GUIDELINES` (or :data:`SHELL_GUIDELINES_DANGEROUS`)
-    6. :data:`DELEGATION_STRATEGY`
-    7. :data:`ASYNC_NOTIFICATIONS`
+    2. :data:`TODO_DISCIPLINE`
+    3. :data:`EXPERIMENT_WORKFLOW`
+    4. :data:`REPORT_TEMPLATE`
+    5. :data:`WRITING_GUIDELINES`
+    6. :data:`SHELL_GUIDELINES` (or :data:`SHELL_GUIDELINES_DANGEROUS`)
+    7. :data:`DELEGATION_STRATEGY`
+    8. :data:`ASYNC_NOTIFICATIONS`
 
     Runtime context is injected per-turn by
     :class:`EvoScientist.middleware.RuntimeContextMiddleware`, so dates and
@@ -436,6 +459,7 @@ def get_system_prompt(
     )
     sections = [
         EVOSCIENTIST_IDENTITY,
+        TODO_DISCIPLINE,
         EXPERIMENT_WORKFLOW,
         REPORT_TEMPLATE,
         WRITING_GUIDELINES,
