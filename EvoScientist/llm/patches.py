@@ -26,7 +26,33 @@ Utilities:
 from __future__ import annotations
 
 import os
+import re
+import sys
+from datetime import UTC, datetime
 from typing import Any
+
+
+def _log(msg: str) -> None:
+    """Write a UTC-timestamped line to stderr, gated on
+    ``EVOSCIENTIST_PATCH_DEBUG``.
+
+    Diagnostic surface for ``langgraph dev``: subprocess stderr is
+    redirected to ``langgraph_dev.log`` (see
+    ``langgraph_dev/manager.py``) while plain
+    ``logging.getLogger(...).info`` is filtered out by langgraph's
+    structlog setup. Direct stderr writes are the only
+    handler-independent surface, and a leading ISO timestamp lets
+    operators filter by ``grep '2026-…'`` without the ``tail -n+NNNN``
+    dance.
+
+    No-op unless ``EVOSCIENTIST_PATCH_DEBUG`` is set in the environment.
+    The patches themselves still apply at module load regardless; only
+    the diagnostic stderr surface is gated.
+    """
+    if not os.environ.get("EVOSCIENTIST_PATCH_DEBUG"):
+        return
+    ts = datetime.now(UTC).isoformat(timespec="seconds")
+    print(f"{ts} EvoScientist.llm.patches: {msg}", file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -727,6 +753,141 @@ def _patch_openai_capture_reasoning_content() -> None:
 
 
 _patch_openai_capture_reasoning_content()
+
+
+# ---------------------------------------------------------------------------
+# Patch (module-level): surface real exception details in the SSE error
+# event payload.
+#
+# Upstream ``langgraph_api.serde.default`` whitelists Python builtins +
+# LangGraph DSL errors for ``str(exc)`` exposure, and falls through to a
+# generic ``"An internal error occurred"`` placeholder for everything
+# else. Provider SDK exceptions (``openai.APIError``,
+# ``anthropic.APIError``, ``google.genai.errors.APIError``,
+# ``httpx.TimeoutException``, …) hit the placeholder, so the WebUI's
+# ``onError`` handler can't distinguish a quota error from a network
+# timeout from a model-not-found error. See
+# ``notes/sse-error-event-payload.md``.
+#
+# Fix: replace ``serde.default`` with a wrapper that emits a richer
+# payload for any ``BaseException``::
+#
+#     {
+#         "error": <type name, original key for backward compat>,
+#         "class": <fully qualified module.QualName>,
+#         "message": <key-redacted str(exc)>,
+#         "provider": <inferred from class module, if known>,
+#         "request_id": <best-effort from exc attrs>,
+#     }
+#
+# ``json_dumpb`` does ``orjson.dumps(obj, default=default)`` — name
+# lookup at call time — so a single attribute reassignment on the
+# source module covers every emit path (SSE, HTTP responses,
+# checkpoint serialization). No importer walk needed; nothing in
+# ``langgraph_api`` imports ``default`` by name. Pre-existing
+# whitelist entries (``ValueError`` etc.) keep behaving exactly as
+# before — the patch only changes the catch-all branch.
+# ---------------------------------------------------------------------------
+_serde_default_patched = False
+
+# Regex catches the common API-key shapes we know about. Compiled at
+# module load so the patched encoder doesn't pay per-call recompile cost.
+_API_KEY_PATTERNS = re.compile(
+    r"\b(?:"
+    r"sk-or-[A-Za-z0-9_\-]{20,}"  # OpenRouter
+    r"|sk-ant-[A-Za-z0-9_\-]{20,}"  # Anthropic
+    r"|sk-proj-[A-Za-z0-9_\-]{20,}"  # OpenAI project keys
+    r"|sk-[A-Za-z0-9_\-]{20,}"  # OpenAI / generic sk-prefixed
+    r"|nvapi-[A-Za-z0-9_\-]{20,}"  # NVIDIA NIM
+    r"|gsk_[A-Za-z0-9_\-]{20,}"  # Groq
+    r"|AIza[A-Za-z0-9_\-]{20,}"  # Google API keys
+    r"|Bearer\s+[A-Za-z0-9_\-\.]{20,}"  # generic bearer tokens
+    r")"
+)
+
+# Module-prefix → provider tag. Order matters for the few cases where
+# both prefixes apply (none do today, but kept explicit).
+_PROVIDER_FROM_MODULE = (
+    ("openai", "openai"),
+    ("anthropic", "anthropic"),
+    ("google.genai", "google_genai"),
+    ("google.api_core", "google_genai"),
+    ("langchain_openrouter", "openrouter"),
+    ("langchain_anthropic", "anthropic"),
+    ("langchain_openai", "openai"),
+    ("langchain_google_genai", "google_genai"),
+)
+
+
+def _redact_api_keys(message: str) -> str:
+    """Replace API-key-shaped substrings in *message* with ``<redacted>``.
+
+    Defensive; provider error messages occasionally echo the
+    authorization header back. We'd rather strip a few characters than
+    leak a key in a WebUI toast.
+    """
+    return _API_KEY_PATTERNS.sub("<redacted>", message)
+
+
+def _provider_from_module(mod_name: str) -> str | None:
+    for prefix, provider in _PROVIDER_FROM_MODULE:
+        if mod_name == prefix or mod_name.startswith(prefix + "."):
+            return provider
+    return None
+
+
+def _patch_serde_default_rich_exception_payload() -> None:
+    global _serde_default_patched
+    if _serde_default_patched:
+        return
+    try:
+        import langgraph_api.serde as _serde_mod
+
+        _orig_default = _serde_mod.default
+
+        def _patched_default(obj: Any) -> Any:
+            # Defer to upstream for non-exceptions and for the existing
+            # whitelist (Python builtins + LangGraph DSL errors + HTTPException).
+            # Only the catch-all branch is replaced — the whitelist already
+            # exposes str(exc), so it doesn't need our help.
+            if not isinstance(obj, BaseException):
+                return _orig_default(obj)
+            try:
+                upstream = _orig_default(obj)
+            except TypeError:
+                # Upstream didn't handle this exception subclass — fall
+                # through to our enriched payload.
+                upstream = None
+            if (
+                isinstance(upstream, dict)
+                and upstream.get("message") != "An internal error occurred"
+            ):
+                # Whitelist branch ran successfully; keep upstream's payload.
+                return upstream
+
+            cls = type(obj)
+            mod = cls.__module__ or ""
+            payload: dict[str, Any] = {
+                "error": cls.__name__,
+                "class": f"{mod}.{cls.__qualname__}" if mod else cls.__qualname__,
+                "message": _redact_api_keys(str(obj)),
+            }
+            provider = _provider_from_module(mod)
+            if provider:
+                payload["provider"] = provider
+            request_id = getattr(obj, "request_id", None)
+            if isinstance(request_id, str) and request_id:
+                payload["request_id"] = request_id
+            return payload
+
+        _serde_mod.default = _patched_default
+        _serde_default_patched = True
+        _log("serde_default_rich_exception_payload=applied")
+    except Exception:
+        pass
+
+
+_patch_serde_default_rich_exception_payload()
 
 
 # ---------------------------------------------------------------------------
