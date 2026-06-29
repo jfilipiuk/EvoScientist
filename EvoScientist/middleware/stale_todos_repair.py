@@ -3,12 +3,12 @@
 Defensive intervener. When the model emits a terminal AIMessage (no
 tool calls) while ``state.todos`` still contains entries in
 ``in_progress`` or ``pending`` status, force-flip those entries to
-``error`` via a ``Command`` state update. Pairs with
-``stale_todos_metric.py`` (observer) and the system-prompt rule that
-instructs the model to reconcile on its own — together: prompt asks
-the model to do the right thing; metric tells us when it didn't;
-this middleware repairs the state so the WebUI shows an honest
-``error`` badge instead of misleading "in flight" / "queued" badges.
+``error`` via a ``Command`` state update. Pairs with the
+``TODO_DISCIPLINE`` system-prompt rule that asks the model to
+reconcile on its own: prompt asks the model to do the right thing;
+this middleware repairs the state when it doesn't, so the WebUI
+shows an honest ``error`` badge instead of misleading "in flight" /
+"queued" badges.
 
 Why ``error`` and not ``completed``:
 

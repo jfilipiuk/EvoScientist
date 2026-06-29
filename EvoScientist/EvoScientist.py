@@ -762,23 +762,11 @@ def _get_default_middleware(
             )
         )
 
-    # Stale-todos observability — main agent only. Logs whenever the agent
-    # ends a turn with todos still in `in_progress` or `pending`. Pure
-    # observer; no behavior change. See
-    # `notes/todos-stale-after-turn-end.md` for the symptom we're tracking.
-    if not for_async_subagent:
-        from .middleware.stale_todos_metric import (
-            create_stale_todos_metric_middleware,
-        )
-
-        mw.append(create_stale_todos_metric_middleware())
-
     # Stale-todos repair — main agent only. Flips stale (`in_progress` /
     # `pending`) entries to `error` when the agent emits a terminal
-    # AIMessage. Pairs with the metric (observer) and the system-prompt
-    # rule (asks the model to reconcile itself). Sub-agents excluded for
-    # the same reason as the metric — they don't manage user-visible
-    # todos.
+    # AIMessage. Pairs with the `TODO_DISCIPLINE` system-prompt rule
+    # that asks the model to reconcile itself. Sub-agents excluded —
+    # they don't manage user-visible todos.
     if not for_async_subagent:
         from .middleware.stale_todos_repair import (
             create_stale_todos_repair_middleware,
