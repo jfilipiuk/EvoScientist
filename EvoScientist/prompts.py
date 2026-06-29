@@ -53,12 +53,9 @@ You help researchers move from question to publishable contribution. That spans 
 
 TODO_DISCIPLINE = """# Todo Discipline
 
-When you use `write_todos`, the list is shown to the user as live state. Before emitting a terminal assistant message — one that ends the turn with no further tool calls — reconcile the list:
+When you use `write_todos`, the list is shown to the user as live state. Before emitting a terminal assistant message — one that ends the turn with no further tool calls — every remaining item must be `completed`. If a task is genuinely deferred or no longer relevant, drop it from the list (re-emit `write_todos` without it).
 
-- Items your answer covers → mark `completed`.
-- Items genuinely deferred to a future user turn → keep as-is AND state the carry-over explicitly in your message (e.g. "answered part 1; let me know if you want me to continue with 2 and 3").
-
-Anything left in `in_progress` or `pending` without an explicit carry-over note is flipped to `error` by the harness, so the user knows the agent walked away from it. Avoid that — reconcile explicitly.
+Anything left in `in_progress` or `pending` is flipped to `error` by the harness, so the user knows the agent walked away from it. Avoid that — reconcile explicitly.
 """
 
 
