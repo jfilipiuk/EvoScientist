@@ -47,8 +47,6 @@ from langgraph.types import Command
 
 _logger = logging.getLogger("EvoScientist.repair.stale_todos")
 
-_STALE_STATUSES = frozenset({"in_progress", "pending"})
-
 
 def _terminal_ai_message(response: ModelResponse) -> AIMessage | None:
     """Return the AIMessage from a terminal model response, else None.
@@ -57,10 +55,14 @@ def _terminal_ai_message(response: ModelResponse) -> AIMessage | None:
     dispatching tools, ``state.todos`` is in motion; repair only makes
     sense once the agent has stopped.
     """
+    # ModelCallResult is a union of ModelResponse | AIMessage |
+    # ExtendedModelResponse; only ModelResponse exposes `.result`.
     result = getattr(response, "result", None)
-    if not isinstance(result, list) or not result:
+    if not result:
         return None
     last = result[-1]
+    # ModelResponse.result is list[BaseMessage]; structured-output
+    # turns can append a ToolMessage, so narrow before use.
     if not isinstance(last, AIMessage):
         return None
     if last.tool_calls:
@@ -68,24 +70,28 @@ def _terminal_ai_message(response: ModelResponse) -> AIMessage | None:
     return last
 
 
-def _repair(state_todos: Any) -> list[dict] | None:
-    """Return a new todos list with stale entries flipped to ``error``,
+def _repair(state_todos: Any) -> tuple[list[dict], int, int] | None:
+    """Return ``(repaired_list, in_progress_flipped, pending_flipped)``
     or ``None`` when nothing needs repair.
     """
-    if not isinstance(state_todos, list) or not state_todos:
+    if not state_todos:
         return None
     repaired: list[dict] = []
-    changed = False
+    in_progress = 0
+    pending = 0
     for entry in state_todos:
-        if not isinstance(entry, dict):
-            repaired.append(entry)
-            continue
-        if entry.get("status") in _STALE_STATUSES:
+        status = entry.get("status")
+        if status == "in_progress":
             repaired.append({**entry, "status": "error"})
-            changed = True
+            in_progress += 1
+        elif status == "pending":
+            repaired.append({**entry, "status": "error"})
+            pending += 1
         else:
             repaired.append(entry)
-    return repaired if changed else None
+    if not (in_progress or pending):
+        return None
+    return repaired, in_progress, pending
 
 
 def _thread_id(request: ModelRequest) -> str | None:
@@ -104,17 +110,11 @@ def _maybe_command(request: ModelRequest, response: ModelResponse) -> Command | 
     msg = _terminal_ai_message(response)
     if msg is None:
         return None
-    state = getattr(request, "state", None) or {}
-    todos = state.get("todos") if isinstance(state, dict) else None
-    repaired = _repair(todos)
+    state = request.state or {}
+    repaired = _repair(state.get("todos"))
     if repaired is None:
         return None
-    in_progress = sum(
-        1 for t in todos if isinstance(t, dict) and t.get("status") == "in_progress"
-    )
-    pending = sum(
-        1 for t in todos if isinstance(t, dict) and t.get("status") == "pending"
-    )
+    repaired_todos, in_progress, pending = repaired
     _logger.info(
         "stale_todos_repaired",
         extra={
@@ -124,7 +124,7 @@ def _maybe_command(request: ModelRequest, response: ModelResponse) -> Command | 
             "pending_flipped": pending,
         },
     )
-    return Command(update={"todos": repaired})
+    return Command(update={"todos": repaired_todos})
 
 
 class StaleTodosRepairMiddleware(AgentMiddleware):
