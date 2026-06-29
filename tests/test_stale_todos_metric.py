@@ -124,6 +124,10 @@ def test_main_agent_middleware_includes_stale_todos_metric(monkeypatch):
             "EvoScientist.EvoScientist._ensure_chat_model",
             return_value=MagicMock(profile={"max_input_tokens": 200_000}),
         ),
+        patch(
+            "EvoScientist.EvoScientist._ensure_auxiliary_chat_model",
+            return_value=MagicMock(profile={"max_input_tokens": 200_000}),
+        ),
         patch("EvoScientist.EvoScientist._ensure_config", return_value=_mock_config()),
     ):
         from EvoScientist.EvoScientist import _get_default_middleware

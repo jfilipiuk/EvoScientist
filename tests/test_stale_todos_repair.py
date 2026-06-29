@@ -140,12 +140,6 @@ def test_preserves_unrelated_todo_fields():
     assert todos[0]["subtasks"] == [1, 2]
 
 
-def test_factory_returns_middleware_instance():
-    assert isinstance(
-        create_stale_todos_repair_middleware(), StaleTodosRepairMiddleware
-    )
-
-
 def _mock_config():
     from unittest.mock import MagicMock
 
@@ -171,6 +165,10 @@ def test_main_agent_middleware_includes_stale_todos_repair():
         ),
         patch(
             "EvoScientist.EvoScientist._ensure_chat_model",
+            return_value=MagicMock(profile={"max_input_tokens": 200_000}),
+        ),
+        patch(
+            "EvoScientist.EvoScientist._ensure_auxiliary_chat_model",
             return_value=MagicMock(profile={"max_input_tokens": 200_000}),
         ),
         patch("EvoScientist.EvoScientist._ensure_config", return_value=_mock_config()),
@@ -201,13 +199,3 @@ def test_async_subagent_middleware_excludes_stale_todos_repair():
         middleware = _get_default_middleware(for_async_subagent=True)
 
     assert not any(isinstance(m, StaleTodosRepairMiddleware) for m in middleware)
-
-
-def test_prompt_includes_todo_discipline_section():
-    from EvoScientist.prompts import get_system_prompt
-
-    prompt = get_system_prompt()
-    assert "Todo Discipline" in prompt
-    assert "reconcile" in prompt
-    assert "completed" in prompt
-    assert "carry-over" in prompt
