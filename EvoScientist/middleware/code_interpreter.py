@@ -100,4 +100,14 @@ def create_code_interpreter_middleware(
         timeout=timeout,
         max_result_chars=max_result_chars,
         tool_name="code_interpreter",
+        # "turn" scopes the QuickJS REPL snapshot to a single agent turn
+        # rather than the entire thread. Upstream default is "thread",
+        # which writes a ~1.7 MB ``_quickjs_snapshot_payload`` blob into
+        # every checkpoint (verified empirically in a 3-message chat;
+        # see ``notes/quickjs-snapshot-payload-bloats-checkpoints.md``).
+        # PTC dispatch and per-turn computation work identically under
+        # "turn"; cross-turn JS state retention is dropped. EvoScientist
+        # agents don't rely on that retention — saved-thread audits show
+        # eval calls are self-contained per turn.
+        mode="turn",
     )

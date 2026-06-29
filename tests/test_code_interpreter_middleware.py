@@ -45,3 +45,18 @@ def test_filter_tools_for_ptc_accepts_default_allowlist():
 
 def test_create_code_interpreter_middleware_builds():
     assert create_code_interpreter_middleware() is not None
+
+
+def test_middleware_uses_turn_mode_not_thread():
+    """Cross-turn snapshot persistence under upstream's default
+    ``mode="thread"`` writes a ~1.7 MB ``_quickjs_snapshot_payload``
+    blob into every checkpoint, even on no-eval turns
+    (``notes/quickjs-snapshot-payload-bloats-checkpoints.md``). We
+    deliberately scope to ``"turn"`` so the snapshot is ephemeral —
+    PTC and per-turn computation still work; only cross-turn JS
+    state retention goes away. Regression guard: if a future
+    refactor silently reverts to ``"thread"``, every saved chat
+    grows by ~1.7 MB per checkpoint.
+    """
+    mw = create_code_interpreter_middleware()
+    assert mw._mode == "turn"
