@@ -1017,8 +1017,12 @@ def _patch_langgraph_schema_generator_silence_warnings() -> None:
         _SchemaGenerator.get_schema = _patched_get_schema
         _langgraph_schema_silenced_patched = True
         _log("langgraph_schema_generator_silenced=applied")
-    except Exception:
-        pass
+    except Exception as exc:
+        # Patches are loader-safe: never crash the import. Surface the
+        # failure on the gated diagnostic channel so operators can tell
+        # "patch silently failed" apart from "patch never tried" when
+        # deploy logs still show YAML-docstring warnings.
+        _log(f"langgraph_schema_generator_silenced=failed: {type(exc).__name__}: {exc}")
 
 
 _patch_langgraph_schema_generator_silence_warnings()

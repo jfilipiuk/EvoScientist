@@ -22,7 +22,17 @@ os.environ.setdefault("REDIS_URI", "redis://localhost:6379")
 # Importing patches.py applies the eager module-level monkey-patch.
 import langgraph_api.utils as _lgapi_utils
 
-import EvoScientist.llm.patches  # noqa: F401
+import EvoScientist.llm.patches as _patches
+
+# Re-invoke the patch after env vars are set. Required because earlier test
+# modules (e.g. test_llm.py) import patches.py *without* DATABASE_URI/
+# REDIS_URI, which makes ``langgraph_api.utils`` fail to import inside the
+# patch's bare ``except``; the loader swallows it and the flag stays False
+# forever (Python won't re-run module-level code on subsequent imports).
+# The patch function is idempotent (early-return on the flag), so calling
+# it here is a no-op when the patch already landed and a successful retry
+# when the prior import failed.
+_patches._patch_langgraph_schema_generator_silence_warnings()
 
 
 class _FakeEndpoint:
