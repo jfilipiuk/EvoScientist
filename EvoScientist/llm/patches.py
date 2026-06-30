@@ -819,7 +819,7 @@ def _build_env_key_redaction_re() -> re.Pattern[str] | None:
         prefixes.append(re.escape(v[:_API_KEY_PREFIX_LEN]))
     if not prefixes:
         return None
-    alternation = "|".join(f"{p}[A-Za-z0-9_\\-\\.]*" for p in prefixes)
+    alternation = "|".join(f"{p}[A-Za-z0-9_+/=.-]*" for p in prefixes)
     return re.compile(alternation)
 
 

@@ -170,6 +170,32 @@ def test_multiple_env_keys_redacted_independently(monkeypatch):
     assert msg.count("<redacted>") == 3
 
 
+def test_base64_suffix_secret_fully_redacted(monkeypatch):
+    """A base64-style secret (containing ``/`` ``+`` ``=``) must redact
+    end-to-end, not leak its tail. CodeRabbit flagged that the original
+    suffix class stopped at base64 padding chars, leaving most of the
+    credential visible after the first delimiter.
+    """
+    import EvoScientist.llm.patches as _p
+
+    key = "AbCdEfGh/secret+tail=="
+    monkeypatch.setenv("SOME_SECRET", key)
+    monkeypatch.setattr(_p, "_API_KEY_PATTERNS", _p._build_env_key_redaction_re())
+
+    fake_exc = type(
+        "APIError",
+        (Exception,),
+        {"__module__": "openai"},
+    )(f"auth failed with token={key} on retry")
+    msg = _serde_mod.default(fake_exc)["message"]
+    assert "secret" not in msg
+    assert "tail" not in msg
+    assert "<redacted>" in msg
+    # Surrounding text survives.
+    assert "auth failed" in msg
+    assert "on retry" in msg
+
+
 def test_unknown_shape_not_redacted_without_env(monkeypatch):
     """Switch to env-only redaction: a key-shaped string that isn't
     actually deployed via env stays in the message. Tradeoff documented
