@@ -10,6 +10,8 @@ classes (``ValueError`` etc.) keep their pre-existing behavior.
 
 from __future__ import annotations
 
+import os
+
 import langgraph_api.serde as _serde_mod
 
 # Importing patches.py applies the eager module-level monkey-patch.
@@ -25,21 +27,25 @@ def test_whitelist_exception_still_uses_str_exc():
     assert payload["message"] == "bad input"
 
 
-def test_non_whitelist_exception_exposes_class_and_message():
-    """Any ``BaseException`` outside the whitelist should land in our
-    enriched branch with ``class`` and a non-generic ``message``.
+def test_non_provider_exception_falls_through_to_upstream():
+    """An exception outside the provider allow-list must not be enriched.
+    It falls through to upstream's branch — either the whitelist (for
+    builtins / LangGraph DSL / HTTPException) or the catch-all generic
+    placeholder. Rationale: non-provider exceptions are rarely
+    actionable for the end user; upstream's defensive behavior is the
+    right one to preserve.
     """
 
     class CustomError(Exception):
         pass
 
-    exc = CustomError("something specific went wrong")
-    payload = _serde_mod.default(exc)
+    payload = _serde_mod.default(CustomError("something specific went wrong"))
+    # Upstream catch-all shape: ``error`` + generic ``message``, no
+    # ``class``/``provider`` enrichment.
     assert payload["error"] == "CustomError"
-    assert payload["message"] == "something specific went wrong"
-    # Class is fully qualified so the WebUI can distinguish
-    # ``openai.APIError`` from ``anthropic.APIError`` etc.
-    assert payload["class"].endswith(".CustomError")
+    assert payload["message"] == "An internal error occurred"
+    assert "class" not in payload
+    assert "provider" not in payload
 
 
 def test_openai_apierror_payload_has_provider_tag():
@@ -96,9 +102,11 @@ def test_langchain_openai_inherits_openai_provider_tag():
     assert payload["provider"] == "openai"
 
 
-def test_unknown_provider_emits_no_provider_field():
-    """Modules we don't recognize shouldn't get a guessed provider —
-    omit the field entirely so the WebUI knows the inference failed.
+def test_unknown_module_falls_through_to_upstream():
+    """An exception from a module we don't recognize as a provider is
+    not enriched at all — it goes through upstream's catch-all and ends
+    up as the generic placeholder. Avoids leaking internal exception
+    text the user can't act on.
     """
     fake_exc = type(
         "WeirdError",
@@ -106,44 +114,195 @@ def test_unknown_provider_emits_no_provider_field():
         {"__module__": "some_random_package"},
     )("weird thing happened")
     payload = _serde_mod.default(fake_exc)
+    assert payload["error"] == "WeirdError"
+    assert payload["message"] == "An internal error occurred"
+    assert "class" not in payload
     assert "provider" not in payload
 
 
-def test_api_key_redacted_in_message():
-    """If a provider error echoes the API key back in its message, the
-    patched encoder must scrub it before serialization.
+def test_env_deployed_key_redacted_in_message(monkeypatch):
+    """A credential exported via env var must be scrubbed if a provider
+    echoes it back in an exception message. The redaction table is
+    built from env at module load; tests rebuild it after monkeypatch.
     """
+    import EvoScientist.llm.patches as _p
+
+    key = "sk-proj-aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890"
+    monkeypatch.setenv("OPENAI_API_KEY", key)
+    monkeypatch.setattr(_p, "_API_KEY_PATTERNS", _p._build_env_key_redaction_re())
+
     fake_exc = type(
         "APIError",
         (Exception,),
         {"__module__": "openai"},
-    )(
-        "Invalid API key: sk-proj-aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890. "
-        "Get a new one at https://platform.openai.com/api-keys"
-    )
+    )(f"Invalid API key: {key}. Get a new one at https://platform.openai.com/api-keys")
     payload = _serde_mod.default(fake_exc)
-    assert "sk-proj-aBcDeFgHiJkLmNoPqRsTuVwXyZ" not in payload["message"]
+    assert key not in payload["message"]
     assert "<redacted>" in payload["message"]
-    # The actionable advice and class info survive redaction.
+    # The actionable advice survives redaction.
     assert "Invalid API key" in payload["message"]
     assert "platform.openai.com" in payload["message"]
 
 
-def test_redaction_covers_multiple_key_shapes():
+def test_multiple_env_keys_redacted_independently(monkeypatch):
+    """Each ``*_API_KEY`` / ``*_TOKEN`` / ``*_SECRET`` env var contributes
+    its own prefix to the alternation.
+    """
+    import EvoScientist.llm.patches as _p
+
+    k1 = "sk-or-aBcDeFg012345678901234"
+    k2 = "AIzaABCDEFGHIJ0123456789"
+    k3 = "ghp_p4t70k3n0123456789abcdef"
+    monkeypatch.setenv("OPENROUTER_API_KEY", k1)
+    monkeypatch.setenv("GOOGLE_API_KEY", k2)
+    monkeypatch.setenv("GITHUB_TOKEN", k3)
+    monkeypatch.setattr(_p, "_API_KEY_PATTERNS", _p._build_env_key_redaction_re())
+
     fake_exc = type(
         "APIError",
         (Exception,),
         {"__module__": "openai"},
-    )(
-        "Failures: sk-or-aBcDeFg012345678901234, AIzaABCDEFGHIJ0123456789, Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6Im"
-    )
-    payload = _serde_mod.default(fake_exc)
-    msg = payload["message"]
-    assert "sk-or-" not in msg
-    assert "AIza" not in msg
-    assert "Bearer eyJ" not in msg
-    # Three distinct redactions, one per key shape.
+    )(f"Failures: {k1}, {k2}, {k3}")
+    msg = _serde_mod.default(fake_exc)["message"]
+    assert k1 not in msg
+    assert k2 not in msg
+    assert k3 not in msg
     assert msg.count("<redacted>") == 3
+
+
+def test_unknown_shape_not_redacted_without_env(monkeypatch):
+    """Switch to env-only redaction: a key-shaped string that isn't
+    actually deployed via env stays in the message. Tradeoff documented
+    on PR #315: we only scrub what we know is a secret.
+    """
+    import EvoScientist.llm.patches as _p
+
+    # Ensure no credential env vars are visible.
+    for k in list(os.environ):
+        if k.endswith(_p._API_KEY_ENV_SUFFIXES):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(_p, "_API_KEY_PATTERNS", _p._build_env_key_redaction_re())
+
+    fake_exc = type(
+        "APIError",
+        (Exception,),
+        {"__module__": "openai"},
+    )("Unknown key seen: sk-or-aBcDeFg012345678901234")
+    msg = _serde_mod.default(fake_exc)["message"]
+    assert "sk-or-aBcDeFg012345678901234" in msg
+    assert "<redacted>" not in msg
+
+
+def test_redaction_regex_holds_only_prefix(monkeypatch):
+    """Defense-in-depth: the compiled regex must not embed the full key.
+    A process-memory leak (traceback locals, debugger) exposes at most
+    the first 8 chars — not the secret.
+    """
+    import EvoScientist.llm.patches as _p
+
+    key = "sk-proj-aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890_secret_suffix"
+    monkeypatch.setenv("OPENAI_API_KEY", key)
+    pattern = _p._build_env_key_redaction_re()
+    assert pattern is not None
+    # The full key never appears in the regex source.
+    assert key not in pattern.pattern
+    assert "aBcDeFgHiJkLmNoPqRs" not in pattern.pattern
+    # Sanity: the regex still matches the key end-to-end (prefix anchor
+    # plus suffix-greedy match).
+    m = pattern.search(f"err: {key}")
+    assert m is not None
+    assert m.group(0) == key
+
+
+def test_openai_status_code_surfaced():
+    """openai/anthropic APIStatusError carries integer ``.status_code`` —
+    surface it so the WebUI can switch on 401 vs 429 vs 5xx.
+    """
+    fake_exc = type(
+        "RateLimitError",
+        (Exception,),
+        {"__module__": "openai", "status_code": 429},
+    )("Rate limit exceeded")
+    payload = _serde_mod.default(fake_exc)
+    assert payload["status_code"] == 429
+
+
+def test_status_code_via_response_attr():
+    """Wrappers that don't promote status to a top-level attr still
+    expose it via ``.response.status_code`` (httpx pattern).
+    """
+
+    class FakeResponse:
+        status_code = 504
+
+    fake_exc = type(
+        "HTTPStatusError",
+        (Exception,),
+        {"__module__": "openai", "response": FakeResponse()},
+    )("Gateway Timeout")
+    payload = _serde_mod.default(fake_exc)
+    assert payload["status_code"] == 504
+
+
+def test_google_genai_status_via_code_attr():
+    """``google.genai.errors.APIError`` stores the HTTP status as
+    integer ``.code`` (the SDK's quirky shape). Type-disambiguated from
+    openai/anthropic's string ``.code`` (provider error code).
+    """
+    fake_exc = type(
+        "APIError",
+        (Exception,),
+        {"__module__": "google.genai.errors", "code": 400},
+    )("invalid argument")
+    payload = _serde_mod.default(fake_exc)
+    assert payload["status_code"] == 400
+    # An integer ``.code`` is HTTP status, not a provider code — must
+    # not bleed into the string ``code`` field.
+    assert "code" not in payload
+
+
+def test_provider_code_surfaced():
+    """Provider error code (e.g. ``insufficient_quota``) is higher signal
+    than the HTTP status alone — surface as ``code``.
+    """
+    fake_exc = type(
+        "APIError",
+        (Exception,),
+        {
+            "__module__": "openai",
+            "code": "insufficient_quota",
+            "status_code": 429,
+        },
+    )("You exceeded your current quota")
+    payload = _serde_mod.default(fake_exc)
+    assert payload["code"] == "insufficient_quota"
+    assert payload["status_code"] == 429
+
+
+def test_error_type_surfaced():
+    """openai exposes a ``type`` label (e.g. ``rate_limit_error``)."""
+    fake_exc = type(
+        "RateLimitError",
+        (Exception,),
+        {"__module__": "openai", "type": "rate_limit_error"},
+    )("limit")
+    payload = _serde_mod.default(fake_exc)
+    assert payload["type"] == "rate_limit_error"
+
+
+def test_extracted_fields_omitted_when_absent():
+    """A bare provider exception with none of these attrs — none of the
+    optional fields appear in the payload.
+    """
+    fake_exc = type(
+        "APIError",
+        (Exception,),
+        {"__module__": "anthropic"},
+    )("connection error")
+    payload = _serde_mod.default(fake_exc)
+    assert "status_code" not in payload
+    assert "code" not in payload
+    assert "type" not in payload
 
 
 def test_request_id_propagated_when_present():
