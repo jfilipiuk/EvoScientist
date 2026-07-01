@@ -5,8 +5,166 @@ in ``EvoScientist/EvoScientist.py`` so it doesn't construct on plain
 ``import EvoScientist``. ``langgraph dev`` 's symbol resolver inspects
 module attributes directly and doesn't trigger ``__getattr__``, so we
 re-export here to make it visible.
+
+Before re-export we upgrade the compiled graph's class in place to
+``_EvoFilteredGraph``, which strips ``PrivateStateAttr``-marked fields
+(currently just ``_quickjs_snapshot_payload``) from ``get_state`` /
+``get_state_history`` responses. Upstream ``langchain_quickjs`` annotates
+the field ``PrivateStateAttr = OmitFromSchema(input=True, output=True)``,
+but LangGraph's ``_prepare_state_snapshot`` doesn't honor that on
+checkpoint reads — every ``getState`` materializes the delta chain back
+into a full ~1.4 MB blob, which the WebUI then downloads. The subclass
+closes the gap without touching the middleware's write path, preserving
+cross-turn REPL persistence as ``langchain-ai/deepagents#3064`` shipped it.
 """
 
-from EvoScientist.EvoScientist import EvoScientist_agent
+from langgraph.graph.state import CompiledStateGraph
+
+from EvoScientist.EvoScientist import EvoScientist_agent as _agent
+
+_PRIVATE_STATE_FIELDS = frozenset({"_quickjs_snapshot_payload"})
+
+
+def _strip_private(snap):
+    """Strip ``PrivateStateAttr``-marked fields from a ``StateSnapshot``.
+
+    Verified against a live history response (`019f1cf3-...` thread, 1 touched
+    turn), the private field leaks on four surfaces — three trivial, one heavy:
+
+    * ``snap.values`` — the materialized channel state exposed as the main
+      payload. For DeltaChannels this is the delta chain replayed into full
+      bytes (~1.4 MB for the quickjs snapshot). ``get_state`` and every
+      history entry.
+    * ``snap.metadata['writes']`` — ``{node_name: {channel: value}}`` map of
+      the raw writes that produced each checkpoint. On the ``after_agent``
+      step that first snapshots the REPL, ``value`` is the encoded write
+      record ``("snap", full_bytes)`` ≈ 1.4 MB.
+    * ``snap.tasks[*].result`` — the return dict of each completed
+      ``PregelTask``. ``after_agent`` returns
+      ``{"_quickjs_snapshot_payload": ("snap", bytes)}``; this dict becomes
+      the task's ``result`` field, which the API surfaces verbatim under
+      ``tasks[*].result`` (``langgraph_api.state:106``). This is the
+      dominant leak: 1.7 MB in the last history entry of any thread whose
+      most-recent-in-window checkpoint had a snapshot anchor.
+    * ``snap.metadata['counters_since_delta_snapshot']`` — DeltaChannel's
+      snapshot cadence bookkeeping ``{channel: [count, superstep]}``. Tiny
+      (~20 B) but exposes the private field name; strip for cleanliness.
+    """
+    if snap is None:
+        return snap
+    values = {k: v for k, v in snap.values.items() if k not in _PRIVATE_STATE_FIELDS}
+    metadata = snap.metadata
+    if metadata:
+        new_metadata = metadata
+        if new_metadata.get("writes"):
+            scrubbed_writes = {
+                node: {
+                    k: v for k, v in ch_writes.items() if k not in _PRIVATE_STATE_FIELDS
+                }
+                for node, ch_writes in new_metadata["writes"].items()
+            }
+            new_metadata = {**new_metadata, "writes": scrubbed_writes}
+        if new_metadata.get("counters_since_delta_snapshot"):
+            scrubbed_counters = {
+                k: v
+                for k, v in new_metadata["counters_since_delta_snapshot"].items()
+                if k not in _PRIVATE_STATE_FIELDS
+            }
+            new_metadata = {
+                **new_metadata,
+                "counters_since_delta_snapshot": scrubbed_counters,
+            }
+        metadata = new_metadata
+    tasks = snap.tasks
+    if tasks:
+        new_tasks = []
+        changed = False
+        for t in tasks:
+            result = getattr(t, "result", None)
+            if isinstance(result, dict) and any(
+                k in result for k in _PRIVATE_STATE_FIELDS
+            ):
+                scrubbed_result = {
+                    k: v for k, v in result.items() if k not in _PRIVATE_STATE_FIELDS
+                }
+                new_tasks.append(t._replace(result=scrubbed_result))
+                changed = True
+            else:
+                new_tasks.append(t)
+        if changed:
+            tasks = tuple(new_tasks)
+    return snap._replace(values=values, metadata=metadata, tasks=tasks)
+
+
+class _EvoFilteredGraph(CompiledStateGraph):
+    """Filters ``PrivateStateAttr``-marked state fields from checkpoint reads.
+
+    ``Pregel.copy`` (langgraph.pregel.main:921) uses ``self.__class__(**attrs)``
+    so this subclass survives the ``graph_obj.copy(update=...)`` call in
+    ``langgraph_api.graph.get_graph`` that binds the checkpointer / store
+    before yielding to endpoint handlers.
+    """
+
+    async def aget_state(self, config, *, subgraphs=False):
+        return _strip_private(await super().aget_state(config, subgraphs=subgraphs))
+
+    def get_state(self, config, *, subgraphs=False):
+        return _strip_private(super().get_state(config, subgraphs=subgraphs))
+
+    async def aget_state_history(self, config, **kw):
+        async for snap in super().aget_state_history(config, **kw):
+            yield _strip_private(snap)
+
+    def get_state_history(self, config, **kw):
+        for snap in super().get_state_history(config, **kw):
+            yield _strip_private(snap)
+
+
+# In-place ``__class__`` swap: the subclass adds only methods (no new
+# instance attributes) so the memory layout is identical and the swap is
+# safe. Constructing a fresh ``_EvoFilteredGraph`` via ``.copy()`` would
+# require reproducing the deep-agent build pipeline; the swap avoids that.
+_agent.__class__ = _EvoFilteredGraph
+EvoScientist_agent = _agent
+
+
+def _apply_filter_to_subagent_graphs() -> None:
+    """Extend the class swap to every subagent graph registered in
+    ``langgraph.json``.
+
+    ``EvoScientist.py:_build_middleware_stack`` installs
+    ``create_code_interpreter_middleware`` unconditionally — it's not gated
+    on the ``for_async_subagent`` flag — so every subagent (sync ``task``
+    dispatch and async ``start_async_task``) carries the QuickJS REPL and
+    can produce ``_quickjs_snapshot_payload`` writes on its own checkpoint
+    namespace.
+
+    Async subagents get their own ``thread_id`` and their ``/threads/{id}/state``
+    endpoint is served by their own compiled graph. Without swapping the
+    class on those graphs, the filter we applied to ``EvoScientist_agent``
+    doesn't reach that endpoint and any real code_interpreter touch inside
+    a subagent leaks the anchor snapshot verbatim.
+
+    Idempotent (skips graphs already swapped) and safe on graphs that don't
+    use the middleware — ``_strip_private`` returns snapshots unchanged when
+    the private field is absent.
+    """
+    from EvoScientist.langgraph_dev import graphs as _sub_graphs
+
+    for name in (
+        "writing_agent",
+        "data_analysis_agent",
+        "scheduler",
+        "evomemory_subagent_worker",
+        "evomemory_turn_worker",
+        "evomemory_observation_linker",
+    ):
+        g = getattr(_sub_graphs, name, None)
+        if g is not None and not isinstance(g, _EvoFilteredGraph):
+            g.__class__ = _EvoFilteredGraph
+
+
+_apply_filter_to_subagent_graphs()
+
 
 __all__ = ["EvoScientist_agent"]

@@ -30,6 +30,7 @@ Usage::
 from __future__ import annotations
 
 from langchain.agents.middleware.types import ModelRequest
+from langchain_core.messages import HumanMessage
 from langchain_quickjs import CodeInterpreterMiddleware
 
 # Defaults match the historical hardcoded values. Callers (the agent
@@ -45,10 +46,41 @@ _MEMORY_FIRST_INTERPRETER_PROMPT = (
 
 
 class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
-    """Code interpreter middleware with EvoScientist's memory preflight hint."""
+    """Code interpreter middleware with EvoScientist's memory preflight hint
+    and a conditional-snapshot optimization on top of upstream ``mode='thread'``.
+
+    Under upstream's default (``mode='thread'``), ``after_agent`` snapshots the
+    QuickJS heap on every turn — even turns where the model didn't invoke the
+    eval tool. Empirically ~50 ms per turn of wasted ``create_snapshot()`` work
+    plus a per-turn write to the ``_quickjs_snapshot_payload`` delta channel.
+    We gate the write on whether any ``AIMessage`` since the last
+    ``HumanMessage`` actually called our tool.
+
+    Cross-turn REPL state is preserved: turns that do touch the REPL still
+    snapshot, and ``before_agent`` restore is unchanged.
+    """
 
     def _prepare_for_call(self, request: ModelRequest) -> str:
         return super()._prepare_for_call(request) + _MEMORY_FIRST_INTERPRETER_PROMPT
+
+    def _repl_touched_this_turn(self, state) -> bool:
+        for msg in reversed(state.get("messages", []) or []):
+            if isinstance(msg, HumanMessage):
+                return False
+            for tc in getattr(msg, "tool_calls", None) or []:
+                if tc.get("name") == self._tool_name:
+                    return True
+        return False
+
+    def after_agent(self, state, runtime):
+        if self._mode == "thread" and not self._repl_touched_this_turn(state):
+            return {}
+        return super().after_agent(state, runtime)
+
+    async def aafter_agent(self, state, runtime):
+        if self._mode == "thread" and not self._repl_touched_this_turn(state):
+            return {}
+        return await super().aafter_agent(state, runtime)
 
 
 # Read-only, batchable tools that benefit from being callable inside JS.
@@ -100,14 +132,4 @@ def create_code_interpreter_middleware(
         timeout=timeout,
         max_result_chars=max_result_chars,
         tool_name="code_interpreter",
-        # "turn" scopes the QuickJS REPL snapshot to a single agent turn
-        # rather than the entire thread. Upstream default is "thread",
-        # which writes a ~1.7 MB ``_quickjs_snapshot_payload`` blob into
-        # every checkpoint (verified empirically in a 3-message chat;
-        # see ``notes/quickjs-snapshot-payload-bloats-checkpoints.md``).
-        # PTC dispatch and per-turn computation work identically under
-        # "turn"; cross-turn JS state retention is dropped. EvoScientist
-        # agents don't rely on that retention — saved-thread audits show
-        # eval calls are self-contained per turn.
-        mode="turn",
     )
