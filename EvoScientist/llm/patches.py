@@ -977,13 +977,13 @@ _patch_serde_default_rich_exception_payload()
 # including upstream's own endpoints whose prose docstrings predate the
 # YAML convention.
 #
-# Fix: replace the warning + traceback with a silent fallback that
-# produces the exact same schema entry. ``/docs`` output is byte-identical
-# to today; only the log noise disappears. The patch lives here rather
-# than monkey-patching individual upstream docstrings because (a) the
-# upstream docstring set churns between langgraph_api versions while
-# this method has been stable, and (b) we'd otherwise be on the hook for
-# rewriting upstream's prose every release.
+# Fix: wrap ``parse_docstring`` itself and absorb ``yaml.YAMLError`` by
+# returning the same fallback shape upstream's except branch produces.
+# Non-YAML exceptions are deliberately left to propagate — upstream's
+# ``get_schema`` already catches them and logs WARNING + traceback, so
+# unexpected failures remain debuggable. Patching ``parse_docstring`` (a
+# small, stable method) instead of ``get_schema`` (the larger loop body)
+# minimizes our exposure to upstream churn.
 # ---------------------------------------------------------------------------
 _langgraph_schema_silenced_patched = False
 
@@ -994,27 +994,18 @@ def _patch_langgraph_schema_generator_silence_warnings() -> None:
         return
     try:
         import langgraph_api.utils as _lgapi_utils
+        import yaml
 
         _SchemaGenerator = _lgapi_utils.SchemaGenerator
+        _orig_parse_docstring = _SchemaGenerator.parse_docstring
 
-        def _patched_get_schema(self: Any, routes: list) -> dict[str, Any]:
-            schema = dict(self.base_schema)
-            schema.setdefault("paths", {})
-            endpoints_info = self.get_endpoints(routes)
-            for endpoint in endpoints_info:
-                try:
-                    parsed = self.parse_docstring(endpoint.func)
-                except Exception:
-                    # Silent fallback — same shape upstream uses when
-                    # parse_docstring fails, just without the warning +
-                    # traceback that pollutes the startup log.
-                    docstring = getattr(endpoint.func, "__doc__", None) or ""
-                    parsed = {"description": docstring}
-                schema["paths"].setdefault(endpoint.path, {})
-                schema["paths"][endpoint.path][endpoint.http_method] = parsed
-            return schema
+        def _patched_parse_docstring(self: Any, func: Any) -> dict[str, Any]:
+            try:
+                return _orig_parse_docstring(self, func)
+            except yaml.YAMLError:
+                return {"description": getattr(func, "__doc__", None) or ""}
 
-        _SchemaGenerator.get_schema = _patched_get_schema
+        _SchemaGenerator.parse_docstring = _patched_parse_docstring
         _langgraph_schema_silenced_patched = True
         _log("langgraph_schema_generator_silenced=applied")
     except Exception as exc:

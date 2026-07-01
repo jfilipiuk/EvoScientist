@@ -10,7 +10,6 @@ entry. The patch keeps the fallback shape but silences the log spam.
 
 from __future__ import annotations
 
-import logging
 import os
 
 # ``langgraph_api.config`` reads several required env vars at import
@@ -73,20 +72,47 @@ def _generator():
     )
 
 
-def test_prose_docstring_no_longer_logs_warning(caplog):
-    """The patched ``get_schema`` must not emit the upstream WARNING
-    (with traceback) when a docstring fails YAML parsing.
+def test_prose_docstring_no_longer_logs_warning():
+    """The patched ``parse_docstring`` must silence upstream's structlog
+    WARNING when ``yaml.safe_load`` fails on a prose docstring.
+
+    Inverts the patch first to prove the fixture actually trips
+    ``yaml.safe_load`` — without this baseline assertion the test would
+    pass vacuously if the fixture stopped triggering the failure path
+    (e.g. if upstream changed how docstrings are pre-processed).
     """
-    routes_stub = []
+    from structlog.testing import capture_logs
+
     gen = _generator()
     endpoint = _FakeEndpoint("/x", "get", _DocstringFixture.prose_with_colon)
-    # Bypass get_endpoints — we hand-feed one fake endpoint.
     gen.get_endpoints = lambda _routes: [endpoint]
-    with caplog.at_level(logging.WARNING):
-        schema = gen.get_schema(routes_stub)
-    # Critical: no log records produced
-    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    # Schema still has the fallback shape
+
+    patched_parse = _lgapi_utils.SchemaGenerator.parse_docstring
+    # Phase 1: baseline. Drop the subclass override so MRO falls through
+    # to Starlette's BaseSchemaGenerator.parse_docstring, which is what
+    # production hits before our patch installs.
+    del _lgapi_utils.SchemaGenerator.parse_docstring
+    try:
+        with capture_logs() as baseline_records:
+            gen.get_schema([])
+    finally:
+        _lgapi_utils.SchemaGenerator.parse_docstring = patched_parse
+
+    baseline_warnings = [r for r in baseline_records if r.get("log_level") == "warning"]
+    assert any(
+        "Unable to parse docstring" in r.get("event", "") for r in baseline_warnings
+    ), "fixture no longer trips parse_docstring — test would pass vacuously"
+
+    # Phase 2: with the patch reinstated, the same call must emit no
+    # warning records.
+    with capture_logs() as patched_records:
+        schema = gen.get_schema([])
+
+    assert [r for r in patched_records if r.get("log_level") == "warning"] == []
+
+    # Schema still has the fallback shape — fixture's prose becomes the
+    # description verbatim (with leading/trailing whitespace from the
+    # docstring preserved by upstream's fallback path).
     entry = schema["paths"]["/x"]["get"]
     assert "description" in entry
     assert "Query params" in entry["description"]
