@@ -26,7 +26,33 @@ Utilities:
 from __future__ import annotations
 
 import os
+import re
+import sys
+from datetime import UTC, datetime
 from typing import Any
+
+
+def _log(msg: str) -> None:
+    """Write a UTC-timestamped line to stderr, gated on
+    ``EVOSCIENTIST_PATCH_DEBUG``.
+
+    Diagnostic surface for ``langgraph dev``: subprocess stderr is
+    redirected to ``langgraph_dev.log`` (see
+    ``langgraph_dev/manager.py``) while plain
+    ``logging.getLogger(...).info`` is filtered out by langgraph's
+    structlog setup. Direct stderr writes are the only
+    handler-independent surface, and a leading ISO timestamp lets
+    operators filter by ``grep '2026-…'`` without the ``tail -n+NNNN``
+    dance.
+
+    No-op unless ``EVOSCIENTIST_PATCH_DEBUG`` is set in the environment.
+    The patches themselves still apply at module load regardless; only
+    the diagnostic stderr surface is gated.
+    """
+    if not os.environ.get("EVOSCIENTIST_PATCH_DEBUG"):
+        return
+    ts = datetime.now(UTC).isoformat(timespec="seconds")
+    print(f"{ts} EvoScientist.llm.patches: {msg}", file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -727,6 +753,208 @@ def _patch_openai_capture_reasoning_content() -> None:
 
 
 _patch_openai_capture_reasoning_content()
+
+
+# ---------------------------------------------------------------------------
+# Patch (module-level): surface real exception details in the SSE error
+# event payload.
+#
+# Upstream ``langgraph_api.serde.default`` whitelists Python builtins +
+# LangGraph DSL errors for ``str(exc)`` exposure, and falls through to a
+# generic ``"An internal error occurred"`` placeholder for everything
+# else. Provider SDK exceptions (``openai.APIError``,
+# ``anthropic.APIError``, ``google.genai.errors.APIError``,
+# ``httpx.TimeoutException``, …) hit the placeholder, so the WebUI's
+# ``onError`` handler can't distinguish a quota error from a network
+# timeout from a model-not-found error.
+#
+# Fix: replace ``serde.default`` with a wrapper that emits a richer
+# payload for exceptions whose module matches a recognized provider::
+#
+#     {
+#         "error": <type name, original key for backward compat>,
+#         "class": <fully qualified module.QualName>,
+#         "message": <key-redacted str(exc)>,
+#         "provider": <inferred from class module>,
+#         "request_id": <best-effort from exc attrs>,
+#     }
+#
+# Anything outside the provider allow-list falls through to upstream
+# untouched — both the whitelist branch (builtins, LangGraph DSL,
+# HTTPException) and the catch-all placeholder. Rationale: a
+# non-provider exception is rarely actionable for the end user, so
+# upstream's defensive placeholder is the right behavior; we only
+# replace it where we have something useful to say.
+#
+# ``json_dumpb`` does ``orjson.dumps(obj, default=default)`` — name
+# lookup at call time — so a single attribute reassignment on the
+# source module covers every emit path (SSE, HTTP responses). No
+# importer walk needed; nothing in ``langgraph_api`` imports
+# ``default`` by name. Checkpoint serialization is unaffected — it
+# routes through ``langgraph.checkpoint.serde.jsonplus`` (ormsgpack),
+# not this orjson default.
+# ---------------------------------------------------------------------------
+_serde_default_patched = False
+
+# Redaction is built from credentials actually deployed via env vars,
+# not from generic key shapes. Rationale: (a) zero false positives — we
+# only scrub strings we know are secrets, (b) defense-in-depth — the
+# compiled regex holds only the first 8 chars of each key, so a leak of
+# the regex object itself (traceback locals, process dump) can't expose
+# the secret. Suffix-greedy match consumes the rest of the key shape at
+# runtime. Rebuilt by tests via ``_build_env_key_redaction_re()`` after
+# monkeypatching the environment.
+_API_KEY_ENV_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET")
+_API_KEY_MIN_LEN = 12
+_API_KEY_PREFIX_LEN = 8
+
+
+def _build_env_key_redaction_re() -> re.Pattern[str] | None:
+    prefixes: list[str] = []
+    for k, v in os.environ.items():
+        if not k.endswith(_API_KEY_ENV_SUFFIXES):
+            continue
+        if not isinstance(v, str) or len(v) < _API_KEY_MIN_LEN:
+            continue
+        prefixes.append(re.escape(v[:_API_KEY_PREFIX_LEN]))
+    if not prefixes:
+        return None
+    alternation = "|".join(f"{p}[A-Za-z0-9_+/=.-]*" for p in prefixes)
+    return re.compile(alternation)
+
+
+_API_KEY_PATTERNS = _build_env_key_redaction_re()
+
+# Module-prefix → provider tag. Order matters for the few cases where
+# both prefixes apply (none do today, but kept explicit).
+_PROVIDER_FROM_MODULE = (
+    ("openai", "openai"),
+    ("anthropic", "anthropic"),
+    ("google.genai", "google_genai"),
+    ("google.api_core", "google_genai"),
+    ("langchain_openrouter", "openrouter"),
+    ("langchain_anthropic", "anthropic"),
+    ("langchain_openai", "openai"),
+    ("langchain_google_genai", "google_genai"),
+)
+
+
+def _redact_api_keys(message: str) -> str:
+    """Replace any deployed key prefix in *message* with ``<redacted>``.
+
+    Defensive; provider error messages occasionally echo the
+    authorization header back. ``_API_KEY_PATTERNS`` is looked up via
+    module globals each call so tests can swap it after rebuilding from
+    a monkeypatched environment.
+    """
+    pattern = _API_KEY_PATTERNS
+    if pattern is None:
+        return message
+    return pattern.sub("<redacted>", message)
+
+
+def _provider_from_module(mod_name: str) -> str | None:
+    for prefix, provider in _PROVIDER_FROM_MODULE:
+        if mod_name == prefix or mod_name.startswith(prefix + "."):
+            return provider
+    return None
+
+
+def _extract_status_code(exc: BaseException) -> int | None:
+    """Best-effort HTTP status code from a provider SDK exception.
+
+    Order matters: openai/anthropic store it on ``.status_code``;
+    httpx-wrappers expose it via ``.response.status_code``;
+    ``google.genai.errors.APIError`` (unusually) stores it as an
+    integer ``.code`` — type-disambiguated from openai/anthropic's
+    string ``.code`` (provider error code, surfaced separately).
+    """
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    response = getattr(exc, "response", None)
+    if response is not None:
+        rsc = getattr(response, "status_code", None)
+        if isinstance(rsc, int):
+            return rsc
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code
+    return None
+
+
+def _extract_provider_code(exc: BaseException) -> str | None:
+    """Provider error code (e.g. ``insufficient_quota``,
+    ``invalid_api_key``). Distinct from HTTP status; higher signal for
+    a WebUI toast than the integer alone.
+    """
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code:
+        return code
+    return None
+
+
+def _extract_error_type(exc: BaseException) -> str | None:
+    """Provider error type label (openai exposes this as ``.type``)."""
+    err_type = getattr(exc, "type", None)
+    if isinstance(err_type, str) and err_type:
+        return err_type
+    return None
+
+
+def _patch_serde_default_rich_exception_payload() -> None:
+    global _serde_default_patched
+    if _serde_default_patched:
+        return
+    try:
+        import langgraph_api.serde as _serde_mod
+
+        _orig_default = _serde_mod.default
+
+        def _patched_default(obj: Any) -> Any:
+            # Only enrich exceptions whose module is in our provider
+            # allow-list. Everything else (non-exceptions, builtins,
+            # LangGraph DSL errors, HTTPException, internal EvoScientist
+            # exceptions) falls through to upstream untouched. We don't
+            # blanket-surface non-provider exceptions because they're
+            # rarely actionable for the end user — that's exactly why
+            # upstream's catch-all returns the generic placeholder.
+            if not isinstance(obj, BaseException):
+                return _orig_default(obj)
+            cls = type(obj)
+            mod = cls.__module__ or ""
+            provider = _provider_from_module(mod)
+            if provider is None:
+                return _orig_default(obj)
+
+            payload: dict[str, Any] = {
+                "error": cls.__name__,
+                "class": f"{mod}.{cls.__qualname__}" if mod else cls.__qualname__,
+                "message": _redact_api_keys(str(obj)),
+                "provider": provider,
+            }
+            status_code = _extract_status_code(obj)
+            if status_code is not None:
+                payload["status_code"] = status_code
+            provider_code = _extract_provider_code(obj)
+            if provider_code is not None:
+                payload["code"] = provider_code
+            err_type = _extract_error_type(obj)
+            if err_type is not None:
+                payload["type"] = err_type
+            request_id = getattr(obj, "request_id", None)
+            if isinstance(request_id, str) and request_id:
+                payload["request_id"] = request_id
+            return payload
+
+        _serde_mod.default = _patched_default
+        _serde_default_patched = True
+        _log("serde_default_rich_exception_payload=applied")
+    except Exception:
+        pass
+
+
+_patch_serde_default_rich_exception_payload()
 
 
 # ---------------------------------------------------------------------------
