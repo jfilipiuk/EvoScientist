@@ -943,3 +943,84 @@ class TestSkillManagerList:
             result = skill_manager.invoke({"action": "list", "include_system": False})
 
         assert "No user skills installed" in result
+
+
+# =============================================================================
+# Tests for skill_manager tool — action="info" invocation-shape output
+# (regression guard: agents burned ~20 turns exploring paths before finding the
+# correct `/skills/<name>/scripts/cli.py` shape — see paths1.json reproducer).
+# =============================================================================
+
+
+class TestSkillManagerInfo:
+    """Tests for the ``info`` action's ``Invoke:`` block.
+
+    Agents that call ``skill_manager(action='info', name=...)`` must get back
+    the *virtual-mount* invocation shape (``/skills/<name>/...``), not just the
+    host path. The host path shown as ``Path:`` is useful for skill authors
+    editing source, but the agent runs skills via the virtual mount that both
+    ``execute`` and the filesystem tools resolve.
+    """
+
+    def _make_skill_with_cli(self, tmp_path, name):
+        skill_dir = tmp_path / name
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: A skill\n---\n"
+        )
+        scripts_dir = skill_dir / "scripts"
+        scripts_dir.mkdir()
+        (scripts_dir / "cli.py").write_text("# stub\n")
+        return skill_dir
+
+    def _make_skill_prompt_only(self, tmp_path, name):
+        skill_dir = tmp_path / name
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: A skill\n---\n"
+        )
+        return skill_dir
+
+    def test_info_includes_execute_invocation_when_cli_exists(self, tmp_path):
+        """Skills with ``scripts/cli.py`` must surface the execute shape."""
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        self._make_skill_with_cli(tmp_path, "with-cli")
+        install_skill(str(tmp_path / "with-cli"), str(workspace_dir))
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", tmp_path / "global-empty"),
+        ):
+            (tmp_path / "global-empty").mkdir()
+            result = skill_manager.invoke({"action": "info", "name": "with-cli"})
+
+        assert "Invoke:" in result
+        assert "read_file /skills/with-cli/SKILL.md" in result
+        assert (
+            "execute: uv run python /skills/with-cli/scripts/cli.py <subcommand>"
+            in result
+        )
+
+    def test_info_omits_execute_invocation_when_no_cli(self, tmp_path):
+        """Prompt-only skills must not advertise a nonexistent CLI script."""
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        self._make_skill_prompt_only(tmp_path, "prompt-only")
+        install_skill(str(tmp_path / "prompt-only"), str(workspace_dir))
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", tmp_path / "global-empty"),
+        ):
+            (tmp_path / "global-empty").mkdir()
+            result = skill_manager.invoke({"action": "info", "name": "prompt-only"})
+
+        assert "read_file /skills/prompt-only/SKILL.md" in result
+        # No cli.py → no execute line. Regression guard: don't advertise
+        # a script the agent will then fail to run.
+        assert "cli.py" not in result

@@ -40,6 +40,27 @@ You help researchers move from question to publishable contribution. That spans 
 - **Stay grounded.** Never invent data, citations, or results. Say "I don't know" or "this is unverified" when that's true. Concrete beats aspirational.
 """
 
+
+# =============================================================================
+# Sandbox path map (virtual mounts inside `execute` and the filesystem tools).
+# Included in sandbox mode only — the dangerous-mode agent operates on the real
+# filesystem and doesn't have virtual mounts.
+# =============================================================================
+
+SANDBOX_PATH_MAP = """# Sandbox Paths
+
+Three path shapes work inside the `execute` shell AND the filesystem tools (`read_file`, `ls`, `glob`) — the shell subprocess sees the same virtual mounts your filesystem tools see, so paths are interchangeable between them:
+
+- `/skills/<name>/...` — read-only mount of installed skills. Invoke a skill's CLI from `execute` with `uv run python /skills/<name>/scripts/cli.py <subcommand> ...`. Read a skill's runbook with `read_file /skills/<name>/SKILL.md`.
+- `/memories/...` — persistent per-workspace memory (graphs, elaborations, saved observations). Same path in both surfaces.
+- `./` (or `.`) — the workspace root: writable, ephemeral per-conversation intermediates.
+
+Do **not** use repo-layout paths like `EvoScientist/skills/...`, `./skills/...`, or absolute host paths like `/home/.../EvoScientist/...`. Those exist only in the source tree — the sandbox does not resolve them, and both `execute` and the filesystem tools will report the file as missing.
+
+Do **not** run `pwd`, `find`, `glob`, or `ls -R` to discover where a skill's scripts live. The `/skills/<name>/scripts/` path is stable and always correct — searching for it wastes turns and can miss it if the search is scoped to `./` (the workspace). If you need to confirm a skill exists, use `skill_manager(action="info", name="<n>")` — it returns the direct invocation shape.
+"""
+
+
 # =============================================================================
 # Experiment workflow (process only — templates / style / shell live in their
 # own constants below to keep this section focused on flow)
@@ -407,12 +428,15 @@ def get_system_prompt(
     Sections are concatenated in this order:
 
     1. :data:`EVOSCIENTIST_IDENTITY`
-    2. :data:`EXPERIMENT_WORKFLOW`
-    3. :data:`REPORT_TEMPLATE`
-    4. :data:`WRITING_GUIDELINES`
-    5. :data:`SHELL_GUIDELINES` (or :data:`SHELL_GUIDELINES_DANGEROUS`)
-    6. :data:`DELEGATION_STRATEGY`
-    7. :data:`ASYNC_NOTIFICATIONS`
+    2. :data:`SANDBOX_PATH_MAP` (sandbox mode only — omitted when
+       ``dangerous=True``, since the real-filesystem agent doesn't
+       have virtual mounts)
+    3. :data:`EXPERIMENT_WORKFLOW`
+    4. :data:`REPORT_TEMPLATE`
+    5. :data:`WRITING_GUIDELINES`
+    6. :data:`SHELL_GUIDELINES` (or :data:`SHELL_GUIDELINES_DANGEROUS`)
+    7. :data:`DELEGATION_STRATEGY`
+    8. :data:`ASYNC_NOTIFICATIONS`
 
     Runtime context is injected per-turn by
     :class:`EvoScientist.middleware.RuntimeContextMiddleware`, so dates and
@@ -436,11 +460,17 @@ def get_system_prompt(
     )
     sections = [
         EVOSCIENTIST_IDENTITY,
-        EXPERIMENT_WORKFLOW,
-        REPORT_TEMPLATE,
-        WRITING_GUIDELINES,
-        shell_guidelines,
-        DELEGATION_STRATEGY,
-        ASYNC_NOTIFICATIONS,
     ]
+    if not dangerous:
+        sections.append(SANDBOX_PATH_MAP)
+    sections.extend(
+        [
+            EXPERIMENT_WORKFLOW,
+            REPORT_TEMPLATE,
+            WRITING_GUIDELINES,
+            shell_guidelines,
+            DELEGATION_STRATEGY,
+            ASYNC_NOTIFICATIONS,
+        ]
+    )
     return "\n".join(sections)

@@ -96,6 +96,31 @@ class TestGetSystemPrompt:
             "Found `/memory/<file>` in system prompt — should be `/memories/<file>`"
         )
 
+    def test_sandbox_path_map_included_in_sandbox_mode(self):
+        """The virtual-mount guide must ship in sandbox mode.
+
+        Regression guard for `notes/paths1.json` — agents burned ~20 turns
+        exploring for skill scripts because SKILL.md documents repo-layout
+        paths (`EvoScientist/skills/...`) that don't exist in the sandbox.
+        The `# Sandbox Paths` section names the correct shape upfront.
+        """
+        result = get_system_prompt(dangerous=False)
+        assert "# Sandbox Paths" in result
+        assert "/skills/<name>/" in result
+        assert "/memories/" in result
+        # Ordering: must appear before the workflow so the agent reads it
+        # before considering any skill-invoking step.
+        assert (
+            0 <= result.find("# Sandbox Paths") < result.find("# Experiment Workflow")
+        )
+
+    def test_sandbox_path_map_omitted_in_dangerous_mode(self):
+        """Dangerous mode operates on the real filesystem — no virtual mounts,
+        so the sandbox-path section would be misleading.
+        """
+        result = get_system_prompt(dangerous=True, cwd="/tmp")
+        assert "# Sandbox Paths" not in result
+
 
 class TestEvoScientistIdentity:
     def test_constant_not_empty(self):
