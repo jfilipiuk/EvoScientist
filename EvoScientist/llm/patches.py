@@ -802,8 +802,10 @@ _serde_default_patched = False
 # compiled regex holds only the first 8 chars of each key, so a leak of
 # the regex object itself (traceback locals, process dump) can't expose
 # the secret. Suffix-greedy match consumes the rest of the key shape at
-# runtime. Rebuilt by tests via ``_build_env_key_redaction_re()`` after
-# monkeypatching the environment.
+# runtime. The table is rebuilt on every ``_redact_api_keys`` call so
+# credentials loaded after import (typically ``load_dotenv`` in a main
+# entry point) still get scrubbed. ``re.compile`` caches by source
+# string internally, so an unchanged env costs a dict lookup.
 _API_KEY_ENV_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET")
 _API_KEY_MIN_LEN = 12
 _API_KEY_PREFIX_LEN = 8
@@ -823,8 +825,6 @@ def _build_env_key_redaction_re() -> re.Pattern[str] | None:
     return re.compile(alternation)
 
 
-_API_KEY_PATTERNS = _build_env_key_redaction_re()
-
 # Module-prefix → provider tag. Order matters for the few cases where
 # both prefixes apply (none do today, but kept explicit).
 _PROVIDER_FROM_MODULE = (
@@ -843,11 +843,10 @@ def _redact_api_keys(message: str) -> str:
     """Replace any deployed key prefix in *message* with ``<redacted>``.
 
     Defensive; provider error messages occasionally echo the
-    authorization header back. ``_API_KEY_PATTERNS`` is looked up via
-    module globals each call so tests can swap it after rebuilding from
-    a monkeypatched environment.
+    authorization header back. Rebuilt per call so credentials loaded
+    after import (typical ``load_dotenv`` pattern) are still redacted.
     """
-    pattern = _API_KEY_PATTERNS
+    pattern = _build_env_key_redaction_re()
     if pattern is None:
         return message
     return pattern.sub("<redacted>", message)

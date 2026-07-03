@@ -125,13 +125,11 @@ def test_unknown_module_falls_through_to_upstream():
 def test_env_deployed_key_redacted_in_message(monkeypatch):
     """A credential exported via env var must be scrubbed if a provider
     echoes it back in an exception message. The redaction table is
-    built from env at module load; tests rebuild it after monkeypatch.
+    built fresh per ``_redact_api_keys`` call, so ``monkeypatch.setenv``
+    alone is enough — no re-import or attribute reassignment needed.
     """
-    import EvoScientist.llm.patches as _p
-
     key = "sk-proj-aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890"
     monkeypatch.setenv("OPENAI_API_KEY", key)
-    monkeypatch.setattr(_p, "_API_KEY_PATTERNS", _p._build_env_key_redaction_re())
 
     fake_exc = type(
         "APIError",
@@ -150,15 +148,12 @@ def test_multiple_env_keys_redacted_independently(monkeypatch):
     """Each ``*_API_KEY`` / ``*_TOKEN`` / ``*_SECRET`` env var contributes
     its own prefix to the alternation.
     """
-    import EvoScientist.llm.patches as _p
-
     k1 = "sk-or-aBcDeFg012345678901234"
     k2 = "AIzaABCDEFGHIJ0123456789"
     k3 = "ghp_p4t70k3n0123456789abcdef"
     monkeypatch.setenv("OPENROUTER_API_KEY", k1)
     monkeypatch.setenv("GOOGLE_API_KEY", k2)
     monkeypatch.setenv("GITHUB_TOKEN", k3)
-    monkeypatch.setattr(_p, "_API_KEY_PATTERNS", _p._build_env_key_redaction_re())
 
     fake_exc = type(
         "APIError",
@@ -178,11 +173,8 @@ def test_base64_suffix_secret_fully_redacted(monkeypatch):
     suffix class stopped at base64 padding chars, leaving most of the
     credential visible after the first delimiter.
     """
-    import EvoScientist.llm.patches as _p
-
     key = "AbCdEfGh/secret+tail=="
     monkeypatch.setenv("SOME_SECRET", key)
-    monkeypatch.setattr(_p, "_API_KEY_PATTERNS", _p._build_env_key_redaction_re())
 
     fake_exc = type(
         "APIError",
@@ -209,7 +201,6 @@ def test_unknown_shape_not_redacted_without_env(monkeypatch):
     for k in list(os.environ):
         if k.endswith(_p._API_KEY_ENV_SUFFIXES):
             monkeypatch.delenv(k, raising=False)
-    monkeypatch.setattr(_p, "_API_KEY_PATTERNS", _p._build_env_key_redaction_re())
 
     fake_exc = type(
         "APIError",
@@ -219,6 +210,33 @@ def test_unknown_shape_not_redacted_without_env(monkeypatch):
     msg = _serde_mod.default(fake_exc)["message"]
     assert "sk-or-aBcDeFg012345678901234" in msg
     assert "<redacted>" not in msg
+
+
+def test_env_key_loaded_after_first_call_is_redacted(monkeypatch):
+    """Regression: the pattern must rebuild per call so keys loaded
+    after ``patches.py`` imports (typical ``load_dotenv`` sequence in
+    a main entry point) are still scrubbed on the next exception.
+    """
+    import EvoScientist.llm.patches as _p
+
+    # No matching env vars visible yet — mirrors "load_dotenv hasn't run".
+    for k in list(os.environ):
+        if k.endswith(_p._API_KEY_ENV_SUFFIXES):
+            monkeypatch.delenv(k, raising=False)
+    key = "sk-proj-loaded_after_import_1234567890abcdef"
+
+    fake_exc_type = type("APIError", (Exception,), {"__module__": "openai"})
+
+    # Pass 1: env empty — key leaks (no pattern to match against).
+    msg1 = _serde_mod.default(fake_exc_type(f"leak: {key}"))["message"]
+    assert key in msg1
+    assert "<redacted>" not in msg1
+
+    # Pass 2: after simulated load_dotenv, next exception scrubs the key.
+    monkeypatch.setenv("OPENAI_API_KEY", key)
+    msg2 = _serde_mod.default(fake_exc_type(f"leak: {key}"))["message"]
+    assert key not in msg2
+    assert "<redacted>" in msg2
 
 
 def test_redaction_regex_holds_only_prefix(monkeypatch):
