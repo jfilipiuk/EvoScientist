@@ -380,3 +380,114 @@ def test_patch_applied_flag_set():
     from EvoScientist.llm.patches import _serde_default_patched
 
     assert _serde_default_patched is True
+
+
+# ---------------------------------------------------------------------------
+# stream.json_dumpb dataclass-bypass shape hook
+# ---------------------------------------------------------------------------
+
+
+def test_shape_hook_transforms_dataclass_provider_exception():
+    """A dataclass-based provider exception (openrouter.errors.*) must
+    become our enriched dict envelope when passed through the hook —
+    otherwise orjson's OPT_SERIALIZE_DATACLASS would emit raw dataclass
+    fields on the SSE wire and lose the ``provider``/``class`` envelope.
+    """
+    import dataclasses
+
+    from EvoScientist.llm.patches import _exception_shape_hook
+
+    @dataclasses.dataclass
+    class FakeOpenRouterError(Exception):
+        message: str
+        status_code: int
+
+        def __init__(self, message: str, status_code: int) -> None:
+            super().__init__(message)
+            object.__setattr__(self, "message", message)
+            object.__setattr__(self, "status_code", status_code)
+
+    FakeOpenRouterError.__module__ = "openrouter.errors.unauthorizedresponse_error"
+    exc = FakeOpenRouterError("User not found.", 401)
+    assert dataclasses.is_dataclass(exc)  # sanity: mimics real OpenRouterError
+
+    result = _exception_shape_hook(exc)
+    assert isinstance(result, dict)
+    assert result["error"] == "FakeOpenRouterError"
+    assert result["class"].startswith("openrouter.errors.")
+    assert result["message"] == "User not found."
+    assert result["provider"] == "openrouter"
+    assert result["status_code"] == 401
+
+
+def test_shape_hook_passes_through_non_exceptions():
+    """Non-exception inputs must reach json_dumpb unchanged — the hook
+    only short-circuits ``BaseException``.
+    """
+    from EvoScientist.llm.patches import _exception_shape_hook
+
+    for obj in (
+        {"already": "a dict"},
+        [1, 2, 3],
+        "just a string",
+        42,
+        None,
+    ):
+        assert _exception_shape_hook(obj) is obj
+
+
+def test_shape_hook_non_provider_exception_defers_to_upstream():
+    """A ``BaseException`` outside the provider allow-list still goes
+    through the hook but emerges as upstream's placeholder shape (not
+    our enriched dict). Prevents the hook from over-surfacing internal
+    exceptions the user can't act on.
+    """
+    from EvoScientist.llm.patches import _exception_shape_hook
+
+    result = _exception_shape_hook(RuntimeError("internal glitch"))
+    assert isinstance(result, dict)
+    assert result["error"] == "RuntimeError"
+    # Upstream whitelist branch — ``RuntimeError`` is in it and gets str(exc).
+    assert result["message"] == "internal glitch"
+    assert "provider" not in result
+
+
+def test_shape_hook_returns_minimal_envelope_when_serde_default_fails(monkeypatch):
+    """Regression: if ``serde.default`` itself raises (upstream drift,
+    installer regression), the hook must NOT fall back to returning the
+    raw exception — that would re-introduce the dataclass bypass this
+    hook exists to prevent. Instead emit a minimal ``{error, message}``
+    envelope so the WebUI still sees a consistent shape.
+    """
+    import EvoScientist.llm.patches as _p
+
+    def _boom(obj):
+        raise RuntimeError("simulated: langgraph_api renamed serde.default")
+
+    monkeypatch.setattr(_serde_mod, "default", _boom)
+
+    class SomeProviderError(Exception):
+        pass
+
+    SomeProviderError.__module__ = "openrouter.errors.foo"
+    result = _p._exception_shape_hook(SomeProviderError("boom"))
+    assert isinstance(result, dict)
+    assert result["error"] == "SomeProviderError"
+    assert result["message"] == "boom"
+    # The lossy fallback drops provider/class/status_code, and that's
+    # the intentional trade — envelope shape is preserved.
+    assert "provider" not in result
+    assert "class" not in result
+
+
+def test_json_dumpb_bypass_target_list_covers_stream_and_webhook():
+    """The dataclass-bypass patch must target every langgraph_api module
+    that feeds raw exceptions to ``json_dumpb`` (verified via
+    ``notes/probe_json_dumpb_callers.py``). Guards against a
+    langgraph_api bump silently introducing another exception-emit
+    call site we don't cover.
+    """
+    from EvoScientist.llm.patches import _json_dumpb_dataclass_bypass_modules
+
+    assert "langgraph_api.stream" in _json_dumpb_dataclass_bypass_modules
+    assert "langgraph_api.webhook" in _json_dumpb_dataclass_bypass_modules
