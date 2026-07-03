@@ -860,6 +860,87 @@ def _provider_from_module(mod_name: str) -> str | None:
     return None
 
 
+# Host → concrete provider. Hand-maintained snapshot mirroring the
+# routed-provider tables in ``llm/models.py`` (``_OPENAI_ROUTED_PROVIDERS``
+# + ``_ANTHROPIC_ROUTED_PROVIDERS``). Kept here rather than imported
+# from ``models.py`` because ``models.py`` imports FROM this module —
+# reversing that would create a circular import. Unknown hosts fall
+# back to ``<module>_compat`` in ``_provider_from_exception`` so the
+# WebUI still knows "openai/anthropic SDK, but not native" instead of
+# getting a misleading concrete tag. Update when a new routed provider
+# is added to ``models.py``.
+_HOST_TO_PROVIDER: dict[str, str] = {
+    "api.openai.com": "openai",
+    "api.anthropic.com": "anthropic",
+    "api.deepseek.com": "deepseek",
+    "api.moonshot.cn": "moonshot",
+    "api.siliconflow.cn": "siliconflow",
+    "open.bigmodel.cn": "zhipu",  # zhipu + zhipu-code share this host
+    "ark.cn-beijing.volces.com": "volcengine",
+    "dashscope.aliyuncs.com": "dashscope",
+    "coding.dashscope.aliyuncs.com": "dashscope",
+    "api.minimaxi.com": "minimax",
+    "api.kimi.com": "kimi",  # kimi-coding shares this host
+    "openrouter.ai": "openrouter",
+}
+
+
+def _extract_host(exc: BaseException) -> str | None:
+    """Best-effort HTTP host from a provider SDK exception.
+
+    openai/anthropic SDKs populate ``.request: httpx.Request`` (and
+    ``.response.request`` on ``APIStatusError`` subclasses).
+    ``httpx.URL`` has ``.host`` which is the FQDN sans scheme/port/path.
+    Returned as lowercase for case-insensitive matching.
+    """
+    for attr_path in (("request",), ("response", "request")):
+        obj: Any = exc
+        for attr in attr_path:
+            obj = getattr(obj, attr, None)
+            if obj is None:
+                break
+        if obj is None:
+            continue
+        url = getattr(obj, "url", None)
+        if url is None:
+            continue
+        host = getattr(url, "host", None)
+        if isinstance(host, str) and host:
+            return host.lower()
+    return None
+
+
+def _provider_from_exception(exc: BaseException) -> str | None:
+    """Infer the concrete provider tag, refining ``openai`` / ``anthropic``
+    module hits via the exception's request URL host.
+
+    Both native OpenAI/Anthropic and every routed provider that talks
+    through their SDK (deepseek, moonshot, siliconflow, zhipu,
+    volcengine, dashscope, custom-openai; minimax, kimi-coding,
+    custom-anthropic) raise the same exception classes — the module
+    prefix alone can't tell them apart. This helper consults
+    ``exc.request.url.host`` and returns the concrete provider from
+    ``_HOST_TO_PROVIDER``; unknown hosts get ``openai_compat`` /
+    ``anthropic_compat`` so the WebUI can tell "SDK shape only" from
+    "real native". Non-openai/anthropic modules use the plain module
+    lookup unchanged.
+    """
+    mod = type(exc).__module__ or ""
+    module_tag = _provider_from_module(mod)
+    if module_tag not in ("openai", "anthropic"):
+        return module_tag
+    host = _extract_host(exc)
+    if not host:
+        # No URL info to disambiguate — trust the module tag. Real SDK
+        # exceptions always carry ``.request``; missing host only
+        # happens on hand-constructed or synthetic exceptions.
+        return module_tag
+    concrete = _HOST_TO_PROVIDER.get(host)
+    if concrete is not None:
+        return concrete
+    return f"{module_tag}_compat"
+
+
 def _extract_status_code(exc: BaseException) -> int | None:
     """Best-effort HTTP status code from a provider SDK exception.
 
@@ -923,7 +1004,7 @@ def _patch_serde_default_rich_exception_payload() -> None:
                 return _orig_default(obj)
             cls = type(obj)
             mod = cls.__module__ or ""
-            provider = _provider_from_module(mod)
+            provider = _provider_from_exception(obj)
             if provider is None:
                 return _orig_default(obj)
 
@@ -987,12 +1068,12 @@ _patch_serde_default_rich_exception_payload()
 # to ``json_dumpb`` in the installed langgraph_api. ``grpc/ops/*`` also
 # has an exception-emit path (``exception_to_struct``) but it's on the
 # gRPC deploy path, not the HTTP-SSE path this project uses; add it if
-# EvoScientist ever ships a gRPC-served build. Enumerated via
-# ``notes/probe_json_dumpb_callers.py``; re-run after a langgraph_api
-# bump. Each successful rebind emits ``json_dumpb_dataclass_bypass=
-# applied module=<name>``; a failed rebind emits ``…=skipped …`` so
-# ops can distinguish "no config in a bare process" from "broken
-# install in production".
+# EvoScientist ever ships a gRPC-served build. Verified by an AST walk
+# of every ``json_dumpb(...)`` call site in langgraph_api — re-run the
+# same walk after a langgraph_api bump. Each successful rebind emits
+# ``json_dumpb_dataclass_bypass=applied module=<name>``; a failed
+# rebind emits ``…=skipped …`` so ops can distinguish "no config in a
+# bare process" from "broken install in production".
 # ---------------------------------------------------------------------------
 _json_dumpb_dataclass_bypass_modules = ("langgraph_api.stream", "langgraph_api.webhook")
 _json_dumpb_patched_modules: set[str] = set()

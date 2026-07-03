@@ -104,6 +104,100 @@ def test_langchain_openai_inherits_openai_provider_tag():
     assert payload["provider"] == "openai"
 
 
+def _make_openai_exc_with_host(module: str, host: str, message: str = "boom"):
+    """Build a fake ``openai.*``-shaped exception whose
+    ``.request.url.host`` matches *host*. Used to exercise the URL-host
+    provider refinement without needing the real openai SDK.
+    """
+
+    class _FakeURL:
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+    class _FakeRequest:
+        def __init__(self, host: str) -> None:
+            self.url = _FakeURL(host)
+
+    fake_cls = type(
+        "APIError",
+        (Exception,),
+        {"__module__": module, "request": _FakeRequest(host)},
+    )
+    return fake_cls(message)
+
+
+def test_deepseek_via_openai_sdk_tagged_by_host():
+    """Regression: providers routed through ``ChatOpenAI`` with a
+    custom ``base_url`` raise ``openai.APIError`` — the module prefix
+    alone would mis-tag them as ``openai``. The URL host refinement
+    must recover the actual provider.
+    """
+    exc = _make_openai_exc_with_host("openai", "api.deepseek.com", "quota exceeded")
+    payload = _serde_mod.default(exc)
+    assert payload["provider"] == "deepseek"
+
+
+def test_moonshot_via_openai_sdk_tagged_by_host():
+    exc = _make_openai_exc_with_host("openai", "api.moonshot.cn")
+    assert _serde_mod.default(exc)["provider"] == "moonshot"
+
+
+def test_zhipu_via_openai_sdk_tagged_by_host():
+    exc = _make_openai_exc_with_host("openai", "open.bigmodel.cn")
+    assert _serde_mod.default(exc)["provider"] == "zhipu"
+
+
+def test_native_openai_host_tagged_openai():
+    exc = _make_openai_exc_with_host("openai", "api.openai.com")
+    assert _serde_mod.default(exc)["provider"] == "openai"
+
+
+def test_unknown_openai_compat_host_tagged_openai_compat():
+    """A ``custom-openai`` deploy points at an arbitrary base_url that
+    isn't in our host map. Fall back to ``openai_compat`` so the WebUI
+    knows "OpenAI SDK, but not native" rather than getting a misleading
+    ``openai`` tag.
+    """
+    exc = _make_openai_exc_with_host("openai", "some.internal.corp")
+    assert _serde_mod.default(exc)["provider"] == "openai_compat"
+
+
+def test_minimax_via_anthropic_sdk_tagged_by_host():
+    """Anthropic-routed providers get the same host-refinement treatment
+    (minimax, kimi-coding, custom-anthropic).
+    """
+    exc = _make_openai_exc_with_host("anthropic", "api.minimaxi.com")
+    assert _serde_mod.default(exc)["provider"] == "minimax"
+
+
+def test_unknown_anthropic_compat_host_tagged_anthropic_compat():
+    exc = _make_openai_exc_with_host("anthropic", "some.internal.corp")
+    assert _serde_mod.default(exc)["provider"] == "anthropic_compat"
+
+
+def test_host_read_from_response_request_when_top_level_missing():
+    """``APIStatusError`` and friends carry the request under
+    ``.response.request`` rather than ``.request``. Both paths must be
+    consulted.
+    """
+
+    class _FakeURL:
+        host = "api.deepseek.com"
+
+    class _FakeRequest:
+        url = _FakeURL()
+
+    class _FakeResponse:
+        request = _FakeRequest()
+
+    exc = type(
+        "APIStatusError",
+        (Exception,),
+        {"__module__": "openai", "response": _FakeResponse()},
+    )("rate limit")
+    assert _serde_mod.default(exc)["provider"] == "deepseek"
+
+
 def test_unknown_module_falls_through_to_upstream():
     """An exception from a module we don't recognize as a provider is
     not enriched at all — it goes through upstream's catch-all and ends
@@ -482,8 +576,7 @@ def test_shape_hook_returns_minimal_envelope_when_serde_default_fails(monkeypatc
 
 def test_json_dumpb_bypass_target_list_covers_stream_and_webhook():
     """The dataclass-bypass patch must target every langgraph_api module
-    that feeds raw exceptions to ``json_dumpb`` (verified via
-    ``notes/probe_json_dumpb_callers.py``). Guards against a
+    that feeds raw exceptions to ``json_dumpb``. Guards against a
     langgraph_api bump silently introducing another exception-emit
     call site we don't cover.
     """
