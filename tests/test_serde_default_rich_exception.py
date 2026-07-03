@@ -1,11 +1,13 @@
 """Regression tests for the serde.default rich-exception-payload patch.
 
-Reproducer: ``notes/sse-error-event-payload.md`` — every
-non-whitelisted exception class hit langgraph_api's catch-all branch
-and emerged as ``"An internal error occurred"`` in the SSE error
-event, regardless of the real cause (OpenAI quota, Anthropic auth,
-Google timeout, …). The patch replaces only the catch-all; whitelist
-classes (``ValueError`` etc.) keep their pre-existing behavior.
+Every provider SDK exception (OpenAI quota, Anthropic auth, Google
+timeout, …) used to emerge as ``"An internal error occurred"`` in the
+SSE error event because langgraph_api's ``serde.default`` catch-all
+only surfaces the class name for a small whitelist. The patch replaces
+``serde.default`` with a wrapper that enriches the payload for
+exceptions whose module matches a recognized provider allow-list;
+everything else (builtins, LangGraph DSL errors, HTTPException,
+internal exceptions) falls through to upstream unchanged.
 """
 
 from __future__ import annotations
