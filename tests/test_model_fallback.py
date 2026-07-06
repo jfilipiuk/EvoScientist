@@ -6,6 +6,7 @@ fallback chain behaviour via _try_fallbacks / _guard_and_fallback.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -222,6 +223,53 @@ class TestTryFallbacks:
         # get_chat_model should only have been called once (for fb-a),
         # fb-b should never be reached.
         assert mock_gcm.call_count == 1
+
+    def test_exhausted_fallbacks_attribute_to_last_failing_model(self):
+        """Regression: when every fallback fails, the raised
+        ``ProviderStreamError`` must be attributed to the model that
+        ACTUALLY failed last, not the original ``request.model``.
+        Prevents a ``deepseek → moonshot`` chain from surfacing as
+        ``provider: deepseek`` after moonshot exhausts its quota.
+        """
+        from EvoScientist.llm.errors import ProviderStreamError
+
+        add_fallback("moonshot-model", "moonshot")
+        # Original request's model is openai-shape. Fallback's model
+        # will be openai-shape with a moonshot base_url.
+        req = _fake_request()
+
+        # ChatOpenAI-shape model instance so ``_provider_from_model``
+        # returns a recognized provider.
+        def _make_openai_model(base_url=None):
+            cls = type(
+                "ChatOpenAI",
+                (),
+                {"__module__": "langchain_openai.chat_models.base"},
+            )
+            inst = cls()
+            inst.openai_api_base = base_url
+            return inst
+
+        req.model = _make_openai_model()  # primary
+        fallback_model = _make_openai_model(base_url="https://api.moonshot.cn/v1")
+        # ``request.override(model=...)`` must return the request with the
+        # new model so ``_try_fallbacks`` tracks the failing model.
+        req.override = MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(model=kw.get("model", req.model))
+        )
+
+        async def _invoke(_r):
+            raise Exception("429 quota exceeded")
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = fallback_model
+            with pytest.raises(ProviderStreamError) as exc_info:
+                _run(_try_fallbacks(req, _invoke, Exception("openai primary failed")))
+
+        # Attribution flipped to moonshot (the failing fallback), not
+        # openai (the original request's model).
+        assert exc_info.value.provider == "moonshot"
+        assert "quota exceeded" in exc_info.value.message
 
 
 # ═════════════════════════════════════════════════════════════════

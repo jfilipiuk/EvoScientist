@@ -26,32 +26,7 @@ Utilities:
 from __future__ import annotations
 
 import os
-import sys
-from datetime import UTC, datetime
 from typing import Any
-
-
-def _log(msg: str) -> None:
-    """Write a UTC-timestamped line to stderr, gated on
-    ``EVOSCIENTIST_PATCH_DEBUG``.
-
-    Diagnostic surface for ``langgraph dev``: subprocess stderr is
-    redirected to ``langgraph_dev.log`` (see
-    ``langgraph_dev/manager.py``) while plain
-    ``logging.getLogger(...).info`` is filtered out by langgraph's
-    structlog setup. Direct stderr writes are the only
-    handler-independent surface, and a leading ISO timestamp lets
-    operators filter by ``grep '2026-…'`` without the ``tail -n+NNNN``
-    dance.
-
-    No-op unless ``EVOSCIENTIST_PATCH_DEBUG`` is set in the environment.
-    The patches themselves still apply at module load regardless; only
-    the diagnostic stderr surface is gated.
-    """
-    if not os.environ.get("EVOSCIENTIST_PATCH_DEBUG"):
-        return
-    ts = datetime.now(UTC).isoformat(timespec="seconds")
-    print(f"{ts} EvoScientist.llm.patches: {msg}", file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------------------

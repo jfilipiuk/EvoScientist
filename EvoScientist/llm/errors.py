@@ -3,15 +3,16 @@
 Provides :class:`ProviderStreamError` — a normalized, non-dataclass
 exception raised by ``ErrorNormalizationMiddleware`` in place of the
 provider SDK exception that a chat model call raised. Non-dataclass on
-purpose: orjson's ``OPT_SERIALIZE_DATACLASS`` fast-path (enabled by
-``langgraph_api.serde.json_dumpb``) enumerates dataclass fields
-directly and skips the ``default=`` hook that builds our SSE envelope.
-Some provider SDKs (openrouter today) decorate their exceptions with
-``@dataclass``, so their errors bypass ``serde.default`` and leak raw
-fields on the wire. Wrapping them in a plain ``Exception`` subclass
-here forces orjson back onto the ``default=`` path, which then calls
-:meth:`ProviderStreamError.model_dump` (upstream checks that hook
-before its ``BaseException`` branch) — no serde monkey-patch needed.
+purpose: since orjson 3.0, dataclass instances are serialized natively
+via their field enumeration, skipping the ``default=`` hook that
+would otherwise build our SSE envelope. Some provider SDKs (openrouter
+today) decorate their exceptions with ``@dataclass``, so their errors
+emerge on the wire as raw dataclass fields — no envelope, no way for
+the WebUI to distinguish quota / auth / rate-limit. Wrapping them in
+a plain ``Exception`` subclass here keeps orjson on the ``default=``
+path, which then calls :meth:`ProviderStreamError.model_dump`
+(upstream ``langgraph_api.serde.default`` checks that hook before its
+``BaseException`` branch) — no serde monkey-patch needed.
 
 Also lives here: the pure-function helpers the middleware uses to
 build the envelope (provider tag from ``ModelRequest.model``, SDK
@@ -164,6 +165,12 @@ def _redact_api_keys(message: str) -> str:
 # ``<module>_compat`` so the WebUI knows "openai/anthropic SDK, but
 # not native" instead of getting a misleading concrete tag. Update
 # when a new routed provider is added to ``models.py``.
+#
+# Related sibling: ``_PROVIDER_EXC_MODULE_PREFIXES`` in
+# ``middleware/error_normalization.py`` — the exception-side
+# provider allow-list. Adding a whole new provider SDK (not just a
+# new base_url routed through an existing one) means updating that
+# list too.
 
 _HOST_TO_PROVIDER: dict[str, str] = {
     "api.openai.com": "openai",
@@ -268,8 +275,19 @@ def _extract_provider_code(exc: BaseException) -> str | None:
 
 
 def _extract_error_type(exc: BaseException) -> str | None:
-    """Provider error type label (openai exposes this as ``.type``)."""
+    """Provider error type label.
+
+    - openai exposes this as ``.type`` (``rate_limit_error`` etc.)
+    - ``google.genai.errors.APIError`` stores a string label at
+      ``.status`` (``"NOT_FOUND"``, ``"RESOURCE_EXHAUSTED"``, …) — a
+      good fit for the same field.
+
+    ``.type`` takes precedence when both are set.
+    """
     err_type = getattr(exc, "type", None)
     if isinstance(err_type, str) and err_type:
         return err_type
+    status = getattr(exc, "status", None)
+    if isinstance(status, str) and status:
+        return status
     return None

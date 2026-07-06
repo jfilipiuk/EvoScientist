@@ -135,9 +135,10 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         except Exception as exc:
             if _handler_called:
                 raise  # Error from downstream model — don't retry
+            from ..llm.errors import ProviderStreamError
             from .error_normalization import _is_provider_error
 
-            if _is_provider_error(exc):
+            if isinstance(exc, ProviderStreamError) or _is_provider_error(exc):
                 # Auth / quota / connection failures on the selector's
                 # own model. Falling back to "use all tools" would hit
                 # the same provider anyway (same client, likely same
@@ -184,9 +185,10 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         except Exception as exc:
             if _handler_called:
                 raise
+            from ..llm.errors import ProviderStreamError
             from .error_normalization import _is_provider_error
 
-            if _is_provider_error(exc):
+            if isinstance(exc, ProviderStreamError) or _is_provider_error(exc):
                 # See sync path — surface provider errors, degrade only
                 # on shape / config failures.
                 raise

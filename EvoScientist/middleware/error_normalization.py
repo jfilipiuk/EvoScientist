@@ -46,6 +46,15 @@ if TYPE_CHECKING:
     from ..llm.errors import ProviderStreamError
 
 
+# Module prefixes for provider SDK exceptions. Consumed by
+# ``_is_provider_error`` to decide whether an exception raised inside
+# a model call should surface as a provider incident or gracefully
+# degrade (used by ``_ConditionalToolSelectorMiddleware``).
+#
+# Related sibling: ``_HOST_TO_PROVIDER`` in ``llm/errors.py`` — the
+# host-side allow-list. Adding a whole new provider SDK means updating
+# both; adding a new routed provider (new base_url through an existing
+# SDK) only touches ``_HOST_TO_PROVIDER``.
 _PROVIDER_EXC_MODULE_PREFIXES: tuple[str, ...] = (
     "openai",
     "anthropic",
