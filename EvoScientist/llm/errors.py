@@ -63,9 +63,7 @@ class ProviderStreamError(Exception):
         self.original = original
 
     def as_envelope(self) -> dict[str, Any]:
-        """Return the SSE envelope dict — the shape ``serde.default``
-        emits when it sees this class.
-        """
+        """Return the SSE envelope dict — the shape the WebUI consumes."""
         payload: dict[str, Any] = {
             "error": self.class_qualname.rsplit(".", 1)[-1],
             "class": self.class_qualname,
@@ -81,3 +79,15 @@ class ProviderStreamError(Exception):
         if self.request_id:
             payload["request_id"] = self.request_id
         return payload
+
+    def model_dump(self) -> dict[str, Any]:
+        """Serialization hook consumed by ``langgraph_api.serde.default``.
+
+        Upstream's dispatch checks ``hasattr(obj, 'model_dump')`` BEFORE
+        the ``isinstance(obj, BaseException)`` branch, so exposing this
+        method lets upstream emit our envelope with no monkey-patch on
+        its ``default`` callable. The name matches Pydantic's
+        convention deliberately — it's the hook upstream is looking
+        for.
+        """
+        return self.as_envelope()

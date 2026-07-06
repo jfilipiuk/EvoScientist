@@ -916,6 +916,56 @@ def _extract_host(exc: BaseException) -> str | None:
     return None
 
 
+def _provider_from_model(model: Any) -> str | None:
+    """Derive the concrete provider tag from a chat model instance.
+
+    Class-based dispatch for unambiguous providers (``ChatOpenRouter``,
+    ``ChatGoogleGenerativeAI``); ``openai_api_base`` /
+    ``anthropic_api_url`` looked up in ``_HOST_TO_PROVIDER`` for
+    openai/anthropic-shape clients (native + routed). Returns ``None``
+    when the model isn't from a recognized provider SDK.
+
+    Preferred over ``_provider_from_exception`` inside the
+    ``ErrorNormalizationMiddleware`` because ``ModelRequest.model``
+    carries the definitive config the exception was raised under —
+    no URL-host inference needed at emit time.
+    """
+    cls_module = type(model).__module__ or ""
+    if cls_module.startswith("langchain_openrouter"):
+        return "openrouter"
+    if cls_module.startswith("langchain_google_genai"):
+        return "google_genai"
+    if cls_module.startswith("langchain_openai"):
+        return _lookup_host_or_compat(
+            getattr(model, "openai_api_base", None), module_tag="openai"
+        )
+    if cls_module.startswith("langchain_anthropic"):
+        return _lookup_host_or_compat(
+            getattr(model, "anthropic_api_url", None), module_tag="anthropic"
+        )
+    return None
+
+
+def _lookup_host_or_compat(base_url: str | None, module_tag: str) -> str:
+    """Extract host from *base_url* and look up in ``_HOST_TO_PROVIDER``.
+
+    Falls back to *module_tag* when no ``base_url`` is set (native SDK
+    default endpoint) or ``<module_tag>_compat`` for an unrecognized
+    host — the honest "openai SDK shape but unknown upstream" tag.
+    """
+    if not base_url:
+        return module_tag
+    try:
+        from urllib.parse import urlparse
+
+        host = urlparse(base_url).hostname
+    except Exception:
+        host = None
+    if not host:
+        return module_tag
+    return _HOST_TO_PROVIDER.get(host.lower(), f"{module_tag}_compat")
+
+
 def _provider_from_exception(exc: BaseException) -> str | None:
     """Infer the concrete provider tag, refining ``openai`` / ``anthropic``
     module hits via the exception's request URL host.

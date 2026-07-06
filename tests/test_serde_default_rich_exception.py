@@ -577,10 +577,19 @@ def test_provider_stream_error_survives_orjson_dataclass_option():
     # Sanity: the raw shape would take orjson's dataclass fast-path.
     assert dataclasses.is_dataclass(raw)
 
-    # Middleware would wrap it; simulate the wrap directly.
+    # Middleware would wrap it; simulate the wrap directly by faking a
+    # request whose ``.model`` is an OpenRouter chat model shape.
+    from types import SimpleNamespace
+
     from EvoScientist.middleware.error_normalization import _normalize
 
-    wrapped = _normalize(raw)
+    fake_openrouter_cls = type(
+        "ChatOpenRouter",
+        (),
+        {"__module__": "langchain_openrouter.chat_models"},
+    )
+    request = SimpleNamespace(model=fake_openrouter_cls())
+    wrapped = _normalize(request, raw)
     assert isinstance(wrapped, ProviderStreamError)
 
     wire = orjson.dumps(

@@ -3,12 +3,15 @@
 Verifies that provider-SDK exceptions from a chat model call get
 wrapped into a non-dataclass ``ProviderStreamError`` at the model
 boundary, and that non-provider exceptions pass through unchanged.
+The provider tag is derived from ``request.model`` (class + base_url),
+not from the raised exception.
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,69 +21,124 @@ from EvoScientist.middleware.error_normalization import (
     _normalize,
 )
 
+# ---------------------------------------------------------------------------
+# Test fixtures — fake chat model instances + requests
+# ---------------------------------------------------------------------------
 
-def _make_provider_exc(module: str, cls_name: str = "APIError", message: str = "boom"):
-    """Build a fake plain-Exception with __module__ set."""
-    return type(cls_name, (Exception,), {"__module__": module})(message)
 
-
-def _make_openai_status_exc(host: str, status_code: int = 401, message: str = "boom"):
-    """Build a fake openai-shaped exception with request.url.host set,
-    exercising the URL-host branch of _provider_from_exception.
+def _fake_model(module: str, cls_name: str, **attrs):
+    """Build a fake chat model instance whose ``type(model).__module__``
+    matches *module*, carrying arbitrary attributes for ``base_url`` /
+    ``openai_api_base`` / ``anthropic_api_url`` lookup.
     """
+    cls = type(cls_name, (), {"__module__": module})
+    inst = cls()
+    for k, v in attrs.items():
+        setattr(inst, k, v)
+    return inst
 
-    class _URL:
-        def __init__(self, host: str) -> None:
-            self.host = host
 
-    class _Request:
-        def __init__(self, host: str) -> None:
-            self.url = _URL(host)
+def _request(model):
+    """Fake ``ModelRequest`` with just the ``.model`` attribute the
+    middleware reads.
+    """
+    return SimpleNamespace(model=model)
 
-    cls = type(
-        "APIError",
-        (Exception,),
-        {
-            "__module__": "openai",
-            "request": _Request(host),
-            "status_code": status_code,
-        },
+
+def _openai_model(base_url: str | None = None):
+    return _fake_model(
+        "langchain_openai.chat_models.base",
+        "ChatOpenAI",
+        openai_api_base=base_url,
     )
+
+
+def _anthropic_model(base_url: str | None = None):
+    return _fake_model(
+        "langchain_anthropic.chat_models",
+        "ChatAnthropic",
+        anthropic_api_url=base_url,
+    )
+
+
+def _openrouter_model():
+    return _fake_model("langchain_openrouter.chat_models", "ChatOpenRouter")
+
+
+def _google_model():
+    return _fake_model("langchain_google_genai.chat_models", "ChatGoogleGenerativeAI")
+
+
+def _make_exc(cls_name: str = "APIError", message: str = "boom", **attrs):
+    """Build a plain-Exception subclass carrying arbitrary attributes
+    (``status_code``, ``code``, ``type``, ``request_id`` …).
+    """
+    cls = type(cls_name, (Exception,), attrs)
     return cls(message)
 
 
+# ---------------------------------------------------------------------------
+# _normalize — provider inference from ModelRequest.model
+# ---------------------------------------------------------------------------
+
+
 class TestNormalize:
-    def test_openai_module_wraps_to_provider_stream_error(self):
-        exc = _make_openai_status_exc("api.openai.com", 429, "rate limited")
-        wrapped = _normalize(exc)
+    def test_openai_native_model_tags_openai(self):
+        req = _request(_openai_model())
+        exc = _make_exc(message="rate limited", status_code=429)
+        wrapped = _normalize(req, exc)
         assert isinstance(wrapped, ProviderStreamError)
         assert wrapped.provider == "openai"
-        assert wrapped.class_qualname.startswith("openai.")
-        assert wrapped.message == "rate limited"
         assert wrapped.status_code == 429
         assert wrapped.original is exc
 
-    def test_openai_routed_host_recovers_concrete_provider(self):
-        exc = _make_openai_status_exc("api.deepseek.com", 401, "quota exceeded")
-        wrapped = _normalize(exc)
-        assert isinstance(wrapped, ProviderStreamError)
+    def test_openai_routed_deepseek_tagged_by_base_url(self):
+        req = _request(_openai_model(base_url="https://api.deepseek.com"))
+        wrapped = _normalize(req, _make_exc(message="quota exceeded"))
         assert wrapped.provider == "deepseek"
 
-    def test_openrouter_module_wraps_to_provider_stream_error(self):
-        exc = _make_provider_exc("openrouter.errors.foo", message="User not found.")
-        wrapped = _normalize(exc)
-        assert isinstance(wrapped, ProviderStreamError)
+    def test_openai_routed_moonshot_tagged_by_base_url(self):
+        req = _request(_openai_model(base_url="https://api.moonshot.cn/v1"))
+        assert _normalize(req, _make_exc()).provider == "moonshot"
+
+    def test_unknown_openai_compat_host_tagged_openai_compat(self):
+        req = _request(_openai_model(base_url="https://internal.corp/v1"))
+        assert _normalize(req, _make_exc()).provider == "openai_compat"
+
+    def test_anthropic_native_model_tags_anthropic(self):
+        req = _request(_anthropic_model(base_url="https://api.anthropic.com"))
+        assert _normalize(req, _make_exc()).provider == "anthropic"
+
+    def test_anthropic_routed_minimax_tagged_by_base_url(self):
+        req = _request(_anthropic_model(base_url="https://api.minimaxi.com/anthropic"))
+        assert _normalize(req, _make_exc()).provider == "minimax"
+
+    def test_unknown_anthropic_compat_host_tagged_anthropic_compat(self):
+        req = _request(_anthropic_model(base_url="https://internal.corp/v1"))
+        assert _normalize(req, _make_exc()).provider == "anthropic_compat"
+
+    def test_openrouter_tagged_from_class_alone(self):
+        req = _request(_openrouter_model())
+        wrapped = _normalize(req, _make_exc(cls_name="UnauthorizedResponseError"))
         assert wrapped.provider == "openrouter"
-        assert wrapped.class_qualname == "openrouter.errors.foo.APIError"
+        assert wrapped.class_qualname.endswith(".UnauthorizedResponseError")
 
-    def test_non_provider_module_returns_none(self):
-        exc = _make_provider_exc("some.random.package")
-        assert _normalize(exc) is None
+    def test_google_genai_tagged_from_class_alone(self):
+        req = _request(_google_model())
+        assert _normalize(req, _make_exc()).provider == "google_genai"
 
-    def test_builtin_exception_returns_none(self):
-        # ValueError is in upstream's whitelist; middleware should not
-        # normalize it — upstream's own path is the right thing.
-        assert _normalize(ValueError("bad input")) is None
+    def test_unrecognized_model_class_returns_none(self):
+        req = _request(_fake_model("some.other.pkg", "SomeModel"))
+        assert _normalize(req, _make_exc()) is None
+
+    def test_missing_model_on_request_returns_none(self):
+        """If the request has no ``.model`` at all (defensive)."""
+        assert _normalize(SimpleNamespace(), _make_exc()) is None
+
+
+# ---------------------------------------------------------------------------
+# ProviderStreamError envelope
+# ---------------------------------------------------------------------------
 
 
 class TestProviderStreamErrorEnvelope:
@@ -120,51 +178,99 @@ class TestProviderStreamErrorEnvelope:
         assert not dataclasses.is_dataclass(err)
         assert not dataclasses.is_dataclass(type(err))
 
+    def test_model_dump_returns_envelope(self):
+        """Upstream ``serde.default`` calls ``model_dump()`` before its
+        exception branch — the hook that lets us skip the serde patch.
+        """
+        err = ProviderStreamError(
+            provider="openrouter",
+            class_qualname="openrouter.errors.foo.UnauthorizedResponseError",
+            message="User not found.",
+            status_code=401,
+        )
+        assert err.model_dump() == err.as_envelope()
+
+
+# ---------------------------------------------------------------------------
+# Middleware behavior
+# ---------------------------------------------------------------------------
+
 
 class TestMiddleware:
-    def _run_awrap(self, mw, handler):
+    def _run_awrap(self, mw, request, handler):
         async def _go():
-            return await mw.awrap_model_call(request=None, handler=handler)
+            return await mw.awrap_model_call(request=request, handler=handler)
 
         return asyncio.run(_go())
 
     def test_awrap_normalizes_provider_exception(self):
-        raised = _make_provider_exc("openrouter.errors.foo", message="boom")
+        raised = _make_exc(cls_name="UnauthorizedResponseError", message="boom")
 
         async def handler(_req):
             raise raised
 
+        req = _request(_openrouter_model())
         mw = ErrorNormalizationMiddleware()
         with pytest.raises(ProviderStreamError) as excinfo:
-            self._run_awrap(mw, handler)
+            self._run_awrap(mw, req, handler)
         assert excinfo.value.provider == "openrouter"
         assert excinfo.value.original is raised
 
-    def test_awrap_passes_through_non_provider_exception(self):
+    def test_awrap_passes_through_non_provider_model_exception(self):
+        """If the model isn't a recognized provider SDK, the exception
+        passes through unwrapped — same as any non-model exception.
+        """
+        raised = _make_exc(message="boom")
+
+        async def handler(_req):
+            raise raised
+
+        req = _request(_fake_model("some.other.pkg", "SomeModel"))
+        mw = ErrorNormalizationMiddleware()
+        with pytest.raises(Exception, match="boom") as excinfo:
+            self._run_awrap(mw, req, handler)
+        assert excinfo.value is raised
+
+    def test_awrap_wraps_any_exception_from_recognized_model(self):
+        """Any exception raised inside a call to a provider-recognized
+        model gets wrapped — including builtins like ``RuntimeError``.
+        Rationale: at the middleware boundary we can tell the model is
+        a provider, but not the exception's origin (SDK vs
+        langchain-wrapper vs httpx vs our code). Wrapping uniformly
+        gives the WebUI a consistent envelope; upstream's
+        ``RuntimeError``-whitelist would emit ``{"error":
+        "RuntimeError", "message": str(exc)}`` which isn't more
+        useful.
+        """
         raised = RuntimeError("internal glitch")
 
         async def handler(_req):
             raise raised
 
+        req = _request(_openai_model())
         mw = ErrorNormalizationMiddleware()
-        with pytest.raises(RuntimeError) as excinfo:
-            self._run_awrap(mw, handler)
-        assert excinfo.value is raised
+        with pytest.raises(ProviderStreamError) as excinfo:
+            self._run_awrap(mw, req, handler)
+        assert excinfo.value.provider == "openai"
+        assert excinfo.value.original is raised
+        assert excinfo.value.class_qualname == "builtins.RuntimeError"
 
     def test_sync_wrap_normalizes_provider_exception(self):
-        raised = _make_provider_exc("openrouter.errors.foo", message="boom")
+        raised = _make_exc(message="boom")
 
         def handler(_req):
             raise raised
 
+        req = _request(_openrouter_model())
         mw = ErrorNormalizationMiddleware()
         with pytest.raises(ProviderStreamError) as excinfo:
-            mw.wrap_model_call(request=None, handler=handler)
+            mw.wrap_model_call(request=req, handler=handler)
         assert excinfo.value.provider == "openrouter"
 
     def test_success_path_returns_handler_result(self):
         async def handler(_req):
             return "ok"
 
+        req = _request(_openrouter_model())
         mw = ErrorNormalizationMiddleware()
-        assert self._run_awrap(mw, handler) == "ok"
+        assert self._run_awrap(mw, req, handler) == "ok"

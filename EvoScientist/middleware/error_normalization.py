@@ -13,18 +13,22 @@ builds our envelope. The wire payload comes out as
 auth / rate-limit / model-not-found.
 
 This middleware sits at the model-call boundary. It catches
-``BaseException`` from ``handler()``, and if the exception belongs to
-a recognized provider module, wraps it in a
+``BaseException`` from ``handler()``, and if ``request.model`` is a
+recognized provider SDK client, wraps the exception in a
 :class:`~EvoScientist.llm.errors.ProviderStreamError` (a plain
 ``Exception`` subclass, not a dataclass). The wrapper carries the SSE
-envelope pre-baked on its instance attributes, so
-``serde.default`` emits the envelope from a lookup rather than
-re-inferring provider / status / redaction at emit time.
+envelope pre-baked on its instance attributes.
 
-Non-provider exceptions (tool ``ValidationError``, ``RuntimeError``,
-``asyncio.TimeoutError``, …) re-raise unchanged so upstream's
-whitelist / catch-all behavior is preserved — same policy the
-``serde.default`` patch already uses.
+Contract: the wrap decision is based on the **model**, not the
+exception. Every exception raised inside a call to a recognized
+provider model gets wrapped — SDK exceptions, httpx errors,
+langchain-wrapper failures, and even builtins like ``RuntimeError``.
+At the middleware boundary we can tell which provider was in use, but
+not the exception's precise origin; a uniform envelope is more useful
+to the WebUI than gambling on the exception class. If the model isn't
+from a recognized provider, or the request carries no ``.model``, the
+exception re-raises unchanged and upstream's whitelist / catch-all
+behavior takes over.
 """
 
 from __future__ import annotations
@@ -42,25 +46,27 @@ if TYPE_CHECKING:
     from ..llm.errors import ProviderStreamError
 
 
-def _normalize(exc: BaseException) -> ProviderStreamError | None:
-    """Return a :class:`ProviderStreamError` wrapping *exc* if it comes
-    from a recognized provider module, or ``None`` if the caller
-    should re-raise *exc* unchanged.
+def _normalize(request: ModelRequest, exc: BaseException) -> ProviderStreamError | None:
+    """Return a :class:`ProviderStreamError` wrapping *exc* if the model
+    on *request* comes from a recognized provider SDK, or ``None`` if
+    the caller should re-raise *exc* unchanged.
 
-    Delegates provider / status / code / redaction extraction to the
-    helpers in ``llm.patches`` so the envelope shape stays in one
-    place.
+    Provider is read from ``request.model`` — the definitive config
+    the exception was raised under, not inferred from the exception
+    class / URL. Status / code / redaction still come from the raised
+    exception because those fields are populated by the SDK at raise
+    time.
     """
     from ..llm.errors import ProviderStreamError
     from ..llm.patches import (
         _extract_error_type,
         _extract_provider_code,
         _extract_status_code,
-        _provider_from_exception,
+        _provider_from_model,
         _redact_api_keys,
     )
 
-    provider = _provider_from_exception(exc)
+    provider = _provider_from_model(getattr(request, "model", None))
     if provider is None:
         return None
     cls = type(exc)
@@ -105,7 +111,7 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
         try:
             return handler(request)
         except BaseException as exc:
-            normalized = _normalize(exc)
+            normalized = _normalize(request, exc)
             if normalized is None:
                 raise
             raise normalized from exc
@@ -118,7 +124,7 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
         try:
             return await handler(request)
         except BaseException as exc:
-            normalized = _normalize(exc)
+            normalized = _normalize(request, exc)
             if normalized is None:
                 raise
             raise normalized from exc
