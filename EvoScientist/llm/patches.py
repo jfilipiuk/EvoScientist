@@ -756,44 +756,12 @@ _patch_openai_capture_reasoning_content()
 
 
 # ---------------------------------------------------------------------------
-# Patch (module-level): surface real exception details in the SSE error
-# event payload.
-#
-# Upstream ``langgraph_api.serde.default`` whitelists Python builtins +
-# LangGraph DSL errors for ``str(exc)`` exposure, and falls through to a
-# generic ``"An internal error occurred"`` placeholder for everything
-# else. Provider SDK exceptions (``openai.APIError``,
-# ``anthropic.APIError``, ``google.genai.errors.APIError``,
-# ``httpx.TimeoutException``, …) hit the placeholder, so the WebUI's
-# ``onError`` handler can't distinguish a quota error from a network
-# timeout from a model-not-found error.
-#
-# Fix: replace ``serde.default`` with a wrapper that runs in two modes.
-#
-# **Fast path** — when the object is a
-# :class:`~EvoScientist.llm.errors.ProviderStreamError` (raised by
-# ``ErrorNormalizationMiddleware`` at the model boundary), emit
-# ``obj.as_envelope()`` directly. Provider tag, HTTP status, request
-# id, and redacted message are already baked onto the instance;
-# nothing more to infer here.
-#
-# **Fallback** — for a raw ``BaseException`` that didn't pass through
-# the middleware (e.g. raised outside a chat-model call), enrich if
-# its module matches a recognized provider (see
-# ``_PROVIDER_FROM_MODULE`` / ``_provider_from_exception``), otherwise
-# defer to upstream. Non-provider exceptions stay with upstream's
-# whitelist / catch-all placeholder — they're rarely actionable for
-# the end user.
-#
-# ``json_dumpb`` calls ``orjson.dumps(obj, default=default)`` with
-# late name lookup, so a single attribute reassignment on the source
-# module covers every emit path (SSE, HTTP responses). Checkpoint
-# serialization is unaffected — it routes through
-# ``langgraph.checkpoint.serde.jsonplus`` (ormsgpack), not this orjson
-# default.
+# Helpers used by ``ErrorNormalizationMiddleware`` to build the SSE
+# error envelope on a :class:`~EvoScientist.llm.errors.ProviderStreamError`.
+# The middleware is the single source of truth — no ``serde.default``
+# monkey-patch is needed because ``ProviderStreamError.model_dump()``
+# is picked up by upstream's own dispatch order.
 # ---------------------------------------------------------------------------
-_serde_default_patched = False
-
 # Redaction is built from credentials actually deployed via env vars,
 # not from generic key shapes. Rationale: (a) zero false positives — we
 # only scrub strings we know are secrets, (b) defense-in-depth — the
@@ -823,21 +791,6 @@ def _build_env_key_redaction_re() -> re.Pattern[str] | None:
     return re.compile(alternation)
 
 
-# Module-prefix → provider tag. Order matters for the few cases where
-# both prefixes apply (none do today, but kept explicit).
-_PROVIDER_FROM_MODULE = (
-    ("openai", "openai"),
-    ("anthropic", "anthropic"),
-    ("google.genai", "google_genai"),
-    ("google.api_core", "google_genai"),
-    ("openrouter", "openrouter"),
-    ("langchain_openrouter", "openrouter"),
-    ("langchain_anthropic", "anthropic"),
-    ("langchain_openai", "openai"),
-    ("langchain_google_genai", "google_genai"),
-)
-
-
 def _redact_api_keys(message: str) -> str:
     """Replace any deployed key prefix in *message* with ``<redacted>``.
 
@@ -851,22 +804,15 @@ def _redact_api_keys(message: str) -> str:
     return pattern.sub("<redacted>", message)
 
 
-def _provider_from_module(mod_name: str) -> str | None:
-    for prefix, provider in _PROVIDER_FROM_MODULE:
-        if mod_name == prefix or mod_name.startswith(prefix + "."):
-            return provider
-    return None
-
-
 # Host → concrete provider. Hand-maintained snapshot mirroring the
 # routed-provider tables in ``llm/models.py`` (``_OPENAI_ROUTED_PROVIDERS``
 # + ``_ANTHROPIC_ROUTED_PROVIDERS``). Kept here rather than imported
 # from ``models.py`` because ``models.py`` imports FROM this module —
-# reversing that would create a circular import. Unknown hosts fall
-# back to ``<module>_compat`` in ``_provider_from_exception`` so the
-# WebUI still knows "openai/anthropic SDK, but not native" instead of
-# getting a misleading concrete tag. Update when a new routed provider
-# is added to ``models.py``.
+# reversing that would create a circular import. Consumed by
+# ``_lookup_host_or_compat``; unknown hosts fall back to
+# ``<module>_compat`` so the WebUI knows "openai/anthropic SDK, but
+# not native" instead of getting a misleading concrete tag. Update
+# when a new routed provider is added to ``models.py``.
 _HOST_TO_PROVIDER: dict[str, str] = {
     "api.openai.com": "openai",
     "api.anthropic.com": "anthropic",
@@ -883,39 +829,6 @@ _HOST_TO_PROVIDER: dict[str, str] = {
 }
 
 
-def _extract_host(exc: BaseException) -> str | None:
-    """Best-effort HTTP host from a provider SDK exception.
-
-    openai/anthropic SDKs populate ``.request: httpx.Request`` (and
-    ``.response.request`` on ``APIStatusError`` subclasses).
-    ``httpx.URL`` has ``.host`` which is the FQDN sans scheme/port/path.
-    Returned as lowercase for case-insensitive matching.
-
-    Every attribute hop is guarded because SDK properties can raise
-    (e.g. ``httpx.Response.request`` raises ``RuntimeError`` when no
-    request was attached). Any failure inside the walk drops us back
-    to the module-tag fallback rather than crashing the error path.
-    """
-    for attr_path in (("request",), ("response", "request")):
-        obj: Any = exc
-        try:
-            for attr in attr_path:
-                obj = getattr(obj, attr, None)
-                if obj is None:
-                    break
-            if obj is None:
-                continue
-            url = getattr(obj, "url", None)
-            if url is None:
-                continue
-            host = getattr(url, "host", None)
-        except Exception:
-            continue
-        if isinstance(host, str) and host:
-            return host.lower()
-    return None
-
-
 def _provider_from_model(model: Any) -> str | None:
     """Derive the concrete provider tag from a chat model instance.
 
@@ -923,12 +836,9 @@ def _provider_from_model(model: Any) -> str | None:
     ``ChatGoogleGenerativeAI``); ``openai_api_base`` /
     ``anthropic_api_url`` looked up in ``_HOST_TO_PROVIDER`` for
     openai/anthropic-shape clients (native + routed). Returns ``None``
-    when the model isn't from a recognized provider SDK.
-
-    Preferred over ``_provider_from_exception`` inside the
-    ``ErrorNormalizationMiddleware`` because ``ModelRequest.model``
-    carries the definitive config the exception was raised under —
-    no URL-host inference needed at emit time.
+    when the model isn't from a recognized provider SDK — the caller
+    (``ErrorNormalizationMiddleware``) then passes the exception
+    through unchanged.
     """
     cls_module = type(model).__module__ or ""
     if cls_module.startswith("langchain_openrouter"):
@@ -964,37 +874,6 @@ def _lookup_host_or_compat(base_url: str | None, module_tag: str) -> str:
     if not host:
         return module_tag
     return _HOST_TO_PROVIDER.get(host.lower(), f"{module_tag}_compat")
-
-
-def _provider_from_exception(exc: BaseException) -> str | None:
-    """Infer the concrete provider tag, refining ``openai`` / ``anthropic``
-    module hits via the exception's request URL host.
-
-    Both native OpenAI/Anthropic and every routed provider that talks
-    through their SDK (deepseek, moonshot, siliconflow, zhipu,
-    volcengine, dashscope, custom-openai; minimax, kimi-coding,
-    custom-anthropic) raise the same exception classes — the module
-    prefix alone can't tell them apart. This helper consults
-    ``exc.request.url.host`` and returns the concrete provider from
-    ``_HOST_TO_PROVIDER``; unknown hosts get ``openai_compat`` /
-    ``anthropic_compat`` so the WebUI can tell "SDK shape only" from
-    "real native". Non-openai/anthropic modules use the plain module
-    lookup unchanged.
-    """
-    mod = type(exc).__module__ or ""
-    module_tag = _provider_from_module(mod)
-    if module_tag not in ("openai", "anthropic"):
-        return module_tag
-    host = _extract_host(exc)
-    if not host:
-        # No URL info to disambiguate — trust the module tag. Real SDK
-        # exceptions always carry ``.request``; missing host only
-        # happens on hand-constructed or synthetic exceptions.
-        return module_tag
-    concrete = _HOST_TO_PROVIDER.get(host)
-    if concrete is not None:
-        return concrete
-    return f"{module_tag}_compat"
 
 
 def _extract_status_code(exc: BaseException) -> int | None:
@@ -1037,74 +916,6 @@ def _extract_error_type(exc: BaseException) -> str | None:
     if isinstance(err_type, str) and err_type:
         return err_type
     return None
-
-
-def _patch_serde_default_rich_exception_payload() -> None:
-    global _serde_default_patched
-    if _serde_default_patched:
-        return
-    try:
-        import langgraph_api.serde as _serde_mod
-
-        _orig_default = _serde_mod.default
-
-        def _patched_default(obj: Any) -> Any:
-            # Only enrich exceptions whose module is in our provider
-            # allow-list. Everything else (non-exceptions, builtins,
-            # LangGraph DSL errors, HTTPException, internal EvoScientist
-            # exceptions) falls through to upstream untouched. We don't
-            # blanket-surface non-provider exceptions because they're
-            # rarely actionable for the end user — that's exactly why
-            # upstream's catch-all returns the generic placeholder.
-            if not isinstance(obj, BaseException):
-                return _orig_default(obj)
-            # Fast path: ErrorNormalizationMiddleware has already baked
-            # the envelope onto the wrapper. Emit it directly and skip
-            # provider / status / redaction inference here — that
-            # inference already ran at the model boundary where we
-            # know the config, and re-running it on the emit path is
-            # wasted work.
-            try:
-                from EvoScientist.llm.errors import ProviderStreamError
-
-                if isinstance(obj, ProviderStreamError):
-                    return obj.as_envelope()
-            except Exception:
-                pass
-            cls = type(obj)
-            mod = cls.__module__ or ""
-            provider = _provider_from_exception(obj)
-            if provider is None:
-                return _orig_default(obj)
-
-            payload: dict[str, Any] = {
-                "error": cls.__name__,
-                "class": f"{mod}.{cls.__qualname__}" if mod else cls.__qualname__,
-                "message": _redact_api_keys(str(obj)),
-                "provider": provider,
-            }
-            status_code = _extract_status_code(obj)
-            if status_code is not None:
-                payload["status_code"] = status_code
-            provider_code = _extract_provider_code(obj)
-            if provider_code is not None:
-                payload["code"] = provider_code
-            err_type = _extract_error_type(obj)
-            if err_type is not None:
-                payload["type"] = err_type
-            request_id = getattr(obj, "request_id", None)
-            if isinstance(request_id, str) and request_id:
-                payload["request_id"] = request_id
-            return payload
-
-        _serde_mod.default = _patched_default
-        _serde_default_patched = True
-        _log("serde_default_rich_exception_payload=applied")
-    except Exception:
-        pass
-
-
-_patch_serde_default_rich_exception_payload()
 
 
 # ---------------------------------------------------------------------------
