@@ -57,8 +57,8 @@ def _normalize(request: ModelRequest, exc: BaseException) -> ProviderStreamError
     exception because those fields are populated by the SDK at raise
     time.
     """
-    from ..llm.errors import ProviderStreamError
-    from ..llm.patches import (
+    from ..llm.errors import (
+        ProviderStreamError,
         _extract_error_type,
         _extract_provider_code,
         _extract_status_code,

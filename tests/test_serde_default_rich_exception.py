@@ -20,7 +20,7 @@ import os
 
 import langgraph_api.serde as _serde_mod
 
-from EvoScientist.llm.patches import (
+from EvoScientist.llm.errors import (
     _API_KEY_ENV_SUFFIXES,
     _build_env_key_redaction_re,
     _extract_error_type,

@@ -9,17 +9,26 @@ directly and skips the ``default=`` hook that builds our SSE envelope.
 Some provider SDKs (openrouter today) decorate their exceptions with
 ``@dataclass``, so their errors bypass ``serde.default`` and leak raw
 fields on the wire. Wrapping them in a plain ``Exception`` subclass
-here forces orjson back onto the ``default=`` path.
+here forces orjson back onto the ``default=`` path, which then calls
+:meth:`ProviderStreamError.model_dump` (upstream checks that hook
+before its ``BaseException`` branch) — no serde monkey-patch needed.
 
-The middleware pre-bakes the envelope fields onto the instance so
-``langgraph_api.serde.default`` can emit the frame directly from
-``.as_envelope()`` without redoing URL-host / module-prefix inference
-at emit time.
+Also lives here: the pure-function helpers the middleware uses to
+build the envelope (provider tag from ``ModelRequest.model``, SDK
+field extractors, env-driven API-key redaction). They stay next to
+:class:`ProviderStreamError` because the middleware is their only
+consumer.
 """
 
 from __future__ import annotations
 
+import os
+import re
 from typing import Any
+
+# ---------------------------------------------------------------------------
+# ProviderStreamError
+# ---------------------------------------------------------------------------
 
 
 class ProviderStreamError(Exception):
@@ -91,3 +100,176 @@ class ProviderStreamError(Exception):
         for.
         """
         return self.as_envelope()
+
+
+# ---------------------------------------------------------------------------
+# API-key redaction — env-driven, prefix-only
+# ---------------------------------------------------------------------------
+#
+# Redaction is built from credentials actually deployed via env vars,
+# not from generic key shapes. Rationale: (a) zero false positives —
+# we only scrub strings we know are secrets, (b) defense-in-depth —
+# the compiled regex holds only the first 8 chars of each key, so a
+# leak of the regex object itself (traceback locals, process dump)
+# can't expose the secret. Suffix-greedy match consumes the rest of
+# the key shape at runtime. The table is rebuilt on every
+# ``_redact_api_keys`` call so credentials loaded after import
+# (typically ``load_dotenv`` in a main entry point) still get
+# scrubbed. ``re.compile`` caches by source string internally, so an
+# unchanged env costs a dict lookup.
+
+_API_KEY_ENV_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET")
+_API_KEY_MIN_LEN = 12
+_API_KEY_PREFIX_LEN = 8
+
+
+def _build_env_key_redaction_re() -> re.Pattern[str] | None:
+    prefixes: list[str] = []
+    for k, v in os.environ.items():
+        if not k.endswith(_API_KEY_ENV_SUFFIXES):
+            continue
+        if not isinstance(v, str) or len(v) < _API_KEY_MIN_LEN:
+            continue
+        prefixes.append(re.escape(v[:_API_KEY_PREFIX_LEN]))
+    if not prefixes:
+        return None
+    alternation = "|".join(f"{p}[A-Za-z0-9_+/=.-]*" for p in prefixes)
+    return re.compile(alternation)
+
+
+def _redact_api_keys(message: str) -> str:
+    """Replace any deployed key prefix in *message* with ``<redacted>``.
+
+    Defensive; provider error messages occasionally echo the
+    authorization header back. Rebuilt per call so credentials loaded
+    after import (typical ``load_dotenv`` pattern) are still redacted.
+    """
+    pattern = _build_env_key_redaction_re()
+    if pattern is None:
+        return message
+    return pattern.sub("<redacted>", message)
+
+
+# ---------------------------------------------------------------------------
+# Provider inference from ModelRequest.model
+# ---------------------------------------------------------------------------
+#
+# Host → concrete provider. Hand-maintained snapshot mirroring the
+# routed-provider tables in ``llm/models.py``
+# (``_OPENAI_ROUTED_PROVIDERS`` + ``_ANTHROPIC_ROUTED_PROVIDERS``).
+# Kept here rather than imported from ``models.py`` because
+# ``models.py`` imports FROM this package's ``patches.py`` — a
+# reverse import back through ``models.py`` would circular. Consumed
+# by ``_lookup_host_or_compat``; unknown hosts fall back to
+# ``<module>_compat`` so the WebUI knows "openai/anthropic SDK, but
+# not native" instead of getting a misleading concrete tag. Update
+# when a new routed provider is added to ``models.py``.
+
+_HOST_TO_PROVIDER: dict[str, str] = {
+    "api.openai.com": "openai",
+    "api.anthropic.com": "anthropic",
+    "api.deepseek.com": "deepseek",
+    "api.moonshot.cn": "moonshot",
+    "api.siliconflow.cn": "siliconflow",
+    "open.bigmodel.cn": "zhipu",  # zhipu + zhipu-code share this host
+    "ark.cn-beijing.volces.com": "volcengine",
+    "dashscope.aliyuncs.com": "dashscope",
+    "coding.dashscope.aliyuncs.com": "dashscope",
+    "api.minimaxi.com": "minimax",
+    "api.kimi.com": "kimi",  # kimi-coding shares this host
+    "openrouter.ai": "openrouter",
+}
+
+
+def _provider_from_model(model: Any) -> str | None:
+    """Derive the concrete provider tag from a chat model instance.
+
+    Class-based dispatch for unambiguous providers (``ChatOpenRouter``,
+    ``ChatGoogleGenerativeAI``); ``openai_api_base`` /
+    ``anthropic_api_url`` looked up in ``_HOST_TO_PROVIDER`` for
+    openai/anthropic-shape clients (native + routed). Returns ``None``
+    when the model isn't from a recognized provider SDK — the caller
+    (``ErrorNormalizationMiddleware``) then passes the exception
+    through unchanged.
+    """
+    cls_module = type(model).__module__ or ""
+    if cls_module.startswith("langchain_openrouter"):
+        return "openrouter"
+    if cls_module.startswith("langchain_google_genai"):
+        return "google_genai"
+    if cls_module.startswith("langchain_openai"):
+        return _lookup_host_or_compat(
+            getattr(model, "openai_api_base", None), module_tag="openai"
+        )
+    if cls_module.startswith("langchain_anthropic"):
+        return _lookup_host_or_compat(
+            getattr(model, "anthropic_api_url", None), module_tag="anthropic"
+        )
+    return None
+
+
+def _lookup_host_or_compat(base_url: str | None, module_tag: str) -> str:
+    """Extract host from *base_url* and look up in ``_HOST_TO_PROVIDER``.
+
+    Falls back to *module_tag* when no ``base_url`` is set (native SDK
+    default endpoint) or ``<module_tag>_compat`` for an unrecognized
+    host — the honest "openai SDK shape but unknown upstream" tag.
+    """
+    if not base_url:
+        return module_tag
+    try:
+        from urllib.parse import urlparse
+
+        host = urlparse(base_url).hostname
+    except Exception:
+        host = None
+    if not host:
+        return module_tag
+    return _HOST_TO_PROVIDER.get(host.lower(), f"{module_tag}_compat")
+
+
+# ---------------------------------------------------------------------------
+# SDK-field extractors — populate the envelope's optional fields
+# ---------------------------------------------------------------------------
+
+
+def _extract_status_code(exc: BaseException) -> int | None:
+    """Best-effort HTTP status code from a provider SDK exception.
+
+    Order matters: openai/anthropic store it on ``.status_code``;
+    httpx-wrappers expose it via ``.response.status_code``;
+    ``google.genai.errors.APIError`` (unusually) stores it as an
+    integer ``.code`` — type-disambiguated from openai/anthropic's
+    string ``.code`` (provider error code, surfaced separately).
+    """
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    response = getattr(exc, "response", None)
+    if response is not None:
+        rsc = getattr(response, "status_code", None)
+        if isinstance(rsc, int):
+            return rsc
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code
+    return None
+
+
+def _extract_provider_code(exc: BaseException) -> str | None:
+    """Provider error code (e.g. ``insufficient_quota``,
+    ``invalid_api_key``). Distinct from HTTP status; higher signal for
+    a WebUI toast than the integer alone.
+    """
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code:
+        return code
+    return None
+
+
+def _extract_error_type(exc: BaseException) -> str | None:
+    """Provider error type label (openai exposes this as ``.type``)."""
+    err_type = getattr(exc, "type", None)
+    if isinstance(err_type, str) and err_type:
+        return err_type
+    return None
