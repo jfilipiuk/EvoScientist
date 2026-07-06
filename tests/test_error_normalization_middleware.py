@@ -135,6 +135,66 @@ class TestNormalize:
         """If the request has no ``.model`` at all (defensive)."""
         assert _normalize(SimpleNamespace(), _make_exc()) is None
 
+    def test_already_normalized_exception_passes_through(self):
+        """``ModelFallbackMiddleware`` wraps against the failing model
+        before re-raising. The outer chain's ``_normalize`` must NOT
+        double-wrap — otherwise attribution flips back to the original
+        request's model.
+        """
+        req = _request(_openrouter_model())
+        pre_wrapped = ProviderStreamError(
+            provider="moonshot",
+            class_qualname="openai.RateLimitError",
+            message="quota exceeded",
+        )
+        assert _normalize(req, pre_wrapped) is None
+
+
+# ---------------------------------------------------------------------------
+# _is_provider_error — used by tool selector to distinguish provider
+# failures (surface) from shape / config failures (degrade)
+# ---------------------------------------------------------------------------
+
+
+class TestIsProviderError:
+    def test_openai_module_is_provider_error(self):
+        from EvoScientist.middleware.error_normalization import _is_provider_error
+
+        assert _is_provider_error(_make_exc(__module__="openai"))
+
+    def test_httpx_timeout_is_provider_error(self):
+        from EvoScientist.middleware.error_normalization import _is_provider_error
+
+        assert _is_provider_error(
+            _make_exc(cls_name="TimeoutException", __module__="httpx")
+        )
+
+    def test_langchain_wrapper_module_is_provider_error(self):
+        from EvoScientist.middleware.error_normalization import _is_provider_error
+
+        assert _is_provider_error(
+            _make_exc(
+                cls_name="BadRequestError",
+                __module__="langchain_openai.chat_models",
+            )
+        )
+
+    def test_pydantic_validation_is_not_provider_error(self):
+        """Structured-output shape failures come from pydantic /
+        langchain, NOT from a provider SDK — the tool selector's
+        graceful-degrade path is right for these.
+        """
+        from EvoScientist.middleware.error_normalization import _is_provider_error
+
+        assert not _is_provider_error(
+            _make_exc(cls_name="ValidationError", __module__="pydantic")
+        )
+
+    def test_builtin_is_not_provider_error(self):
+        from EvoScientist.middleware.error_normalization import _is_provider_error
+
+        assert not _is_provider_error(RuntimeError("x"))
+
 
 # ---------------------------------------------------------------------------
 # ProviderStreamError envelope

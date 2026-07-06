@@ -46,6 +46,36 @@ if TYPE_CHECKING:
     from ..llm.errors import ProviderStreamError
 
 
+_PROVIDER_EXC_MODULE_PREFIXES: tuple[str, ...] = (
+    "openai",
+    "anthropic",
+    "google.genai",
+    "google.api_core",
+    "openrouter",
+    "langchain_openai",
+    "langchain_anthropic",
+    "langchain_google_genai",
+    "langchain_openrouter",
+    "httpx",
+)
+
+
+def _is_provider_error(exc: BaseException) -> bool:
+    """True if *exc* looks like it originated inside a provider SDK
+    (openai, anthropic, google.genai, openrouter, httpx, or their
+    langchain wrappers), as opposed to a shape / config error (structured
+    output not supported, malformed schema, missing tool, …).
+
+    Used by callers that need to decide whether an exception from the
+    model call is worth surfacing to the user (provider errors) or
+    can be silently degraded around (shape errors). Cheap alternative
+    to inspecting ``status_code`` / ``request`` because some provider
+    errors — connection errors, timeouts — don't carry those attributes.
+    """
+    module = type(exc).__module__ or ""
+    return any(module.startswith(p) for p in _PROVIDER_EXC_MODULE_PREFIXES)
+
+
 def _normalize(request: ModelRequest, exc: BaseException) -> ProviderStreamError | None:
     """Return a :class:`ProviderStreamError` wrapping *exc* if the model
     on *request* comes from a recognized provider SDK, or ``None`` if
@@ -65,6 +95,12 @@ def _normalize(request: ModelRequest, exc: BaseException) -> ProviderStreamError
         _provider_from_model,
         _redact_api_keys,
     )
+
+    # Already normalized (e.g. by ModelFallbackMiddleware wrapping against
+    # the actual failing model rather than the original request's model).
+    # Pass through — re-wrapping would double-attribute.
+    if isinstance(exc, ProviderStreamError):
+        return None
 
     provider = _provider_from_model(getattr(request, "model", None))
     if provider is None:
