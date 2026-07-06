@@ -51,8 +51,11 @@ def test_non_provider_exception_falls_through_to_upstream():
 
 
 def test_openai_apierror_payload_has_provider_tag():
-    """OpenAI SDK exceptions should be tagged ``provider: openai``
-    based on their module prefix.
+    """Exercises the no-host fallback: when a fake exception has no
+    ``.request`` attribute, ``_provider_from_exception`` skips the
+    URL-host lookup and falls back to the module tag (``openai``). Real
+    SDK exceptions always carry ``.request``, so the fallback fires
+    mostly for hand-constructed / synthetic exceptions.
     """
     # Fake the class shape without importing openai (so the test works
     # even if the SDK isn't installed).
@@ -71,6 +74,9 @@ def test_openai_apierror_payload_has_provider_tag():
 
 
 def test_anthropic_apierror_payload_has_provider_tag():
+    """Same no-host fallback path as the openai case, exercised on the
+    ``anthropic`` module tag.
+    """
     fake_exc = type(
         "AuthenticationError",
         (Exception,),
@@ -92,8 +98,11 @@ def test_google_genai_payload_has_provider_tag():
 
 
 def test_langchain_openai_inherits_openai_provider_tag():
-    """Wrapper-layer exceptions (langchain_openai etc.) should still
-    map to their upstream provider tag.
+    """Wrapper-layer module prefixes (``langchain_openai`` etc.) map to
+    their upstream provider tag via the allow-list. This test also
+    exercises the no-host fallback — a real ``ChatOpenAI`` exception
+    would carry ``.request`` and get URL-host refined, but for the
+    hand-constructed shape here the module tag stands.
     """
     fake_exc = type(
         "BadRequestError",
@@ -196,6 +205,41 @@ def test_host_read_from_response_request_when_top_level_missing():
         {"__module__": "openai", "response": _FakeResponse()},
     )("rate limit")
     assert _serde_mod.default(exc)["provider"] == "deepseek"
+
+
+def test_host_extraction_survives_property_that_raises():
+    """Regression: ``httpx.Response.request`` raises ``RuntimeError``
+    when no request is attached to the response. ``_extract_host``
+    must swallow property-access failures and fall back to the module
+    tag rather than crashing the error path.
+    """
+
+    class _RaisingRequest:
+        @property
+        def url(self):
+            raise RuntimeError("no request attached")
+
+    class _RaisingResponse:
+        @property
+        def request(self):
+            raise RuntimeError("no request attached")
+
+    # Top-level ``.request.url`` raises via the property.
+    exc1 = type(
+        "APIError",
+        (Exception,),
+        {"__module__": "openai", "request": _RaisingRequest()},
+    )("boom")
+    # Should fall back to module tag ("openai"), not crash.
+    assert _serde_mod.default(exc1)["provider"] == "openai"
+
+    # ``.response.request`` raises via the property.
+    exc2 = type(
+        "APIStatusError",
+        (Exception,),
+        {"__module__": "openai", "response": _RaisingResponse()},
+    )("boom")
+    assert _serde_mod.default(exc2)["provider"] == "openai"
 
 
 def test_unknown_module_falls_through_to_upstream():

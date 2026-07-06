@@ -768,31 +768,29 @@ _patch_openai_capture_reasoning_content()
 # ``onError`` handler can't distinguish a quota error from a network
 # timeout from a model-not-found error.
 #
-# Fix: replace ``serde.default`` with a wrapper that emits a richer
-# payload for exceptions whose module matches a recognized provider::
+# Fix: replace ``serde.default`` with a wrapper that runs in two modes.
 #
-#     {
-#         "error": <type name, original key for backward compat>,
-#         "class": <fully qualified module.QualName>,
-#         "message": <key-redacted str(exc)>,
-#         "provider": <inferred from class module>,
-#         "request_id": <best-effort from exc attrs>,
-#     }
+# **Fast path** — when the object is a
+# :class:`~EvoScientist.llm.errors.ProviderStreamError` (raised by
+# ``ErrorNormalizationMiddleware`` at the model boundary), emit
+# ``obj.as_envelope()`` directly. Provider tag, HTTP status, request
+# id, and redacted message are already baked onto the instance;
+# nothing more to infer here.
 #
-# Anything outside the provider allow-list falls through to upstream
-# untouched — both the whitelist branch (builtins, LangGraph DSL,
-# HTTPException) and the catch-all placeholder. Rationale: a
-# non-provider exception is rarely actionable for the end user, so
-# upstream's defensive placeholder is the right behavior; we only
-# replace it where we have something useful to say.
+# **Fallback** — for a raw ``BaseException`` that didn't pass through
+# the middleware (e.g. raised outside a chat-model call), enrich if
+# its module matches a recognized provider (see
+# ``_PROVIDER_FROM_MODULE`` / ``_provider_from_exception``), otherwise
+# defer to upstream. Non-provider exceptions stay with upstream's
+# whitelist / catch-all placeholder — they're rarely actionable for
+# the end user.
 #
-# ``json_dumpb`` does ``orjson.dumps(obj, default=default)`` — name
-# lookup at call time — so a single attribute reassignment on the
-# source module covers every emit path (SSE, HTTP responses). No
-# importer walk needed; nothing in ``langgraph_api`` imports
-# ``default`` by name. Checkpoint serialization is unaffected — it
-# routes through ``langgraph.checkpoint.serde.jsonplus`` (ormsgpack),
-# not this orjson default.
+# ``json_dumpb`` calls ``orjson.dumps(obj, default=default)`` with
+# late name lookup, so a single attribute reassignment on the source
+# module covers every emit path (SSE, HTTP responses). Checkpoint
+# serialization is unaffected — it routes through
+# ``langgraph.checkpoint.serde.jsonplus`` (ormsgpack), not this orjson
+# default.
 # ---------------------------------------------------------------------------
 _serde_default_patched = False
 
@@ -892,19 +890,27 @@ def _extract_host(exc: BaseException) -> str | None:
     ``.response.request`` on ``APIStatusError`` subclasses).
     ``httpx.URL`` has ``.host`` which is the FQDN sans scheme/port/path.
     Returned as lowercase for case-insensitive matching.
+
+    Every attribute hop is guarded because SDK properties can raise
+    (e.g. ``httpx.Response.request`` raises ``RuntimeError`` when no
+    request was attached). Any failure inside the walk drops us back
+    to the module-tag fallback rather than crashing the error path.
     """
     for attr_path in (("request",), ("response", "request")):
         obj: Any = exc
-        for attr in attr_path:
-            obj = getattr(obj, attr, None)
+        try:
+            for attr in attr_path:
+                obj = getattr(obj, attr, None)
+                if obj is None:
+                    break
             if obj is None:
-                break
-        if obj is None:
+                continue
+            url = getattr(obj, "url", None)
+            if url is None:
+                continue
+            host = getattr(url, "host", None)
+        except Exception:
             continue
-        url = getattr(obj, "url", None)
-        if url is None:
-            continue
-        host = getattr(url, "host", None)
         if isinstance(host, str) and host:
             return host.lower()
     return None
