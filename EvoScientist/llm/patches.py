@@ -1002,6 +1002,19 @@ def _patch_serde_default_rich_exception_payload() -> None:
             # upstream's catch-all returns the generic placeholder.
             if not isinstance(obj, BaseException):
                 return _orig_default(obj)
+            # Fast path: ErrorNormalizationMiddleware has already baked
+            # the envelope onto the wrapper. Emit it directly and skip
+            # provider / status / redaction inference here — that
+            # inference already ran at the model boundary where we
+            # know the config, and re-running it on the emit path is
+            # wasted work.
+            try:
+                from EvoScientist.llm.errors import ProviderStreamError
+
+                if isinstance(obj, ProviderStreamError):
+                    return obj.as_envelope()
+            except Exception:
+                pass
             cls = type(obj)
             mod = cls.__module__ or ""
             provider = _provider_from_exception(obj)

@@ -584,3 +584,82 @@ def test_json_dumpb_bypass_target_list_covers_stream_and_webhook():
 
     assert "langgraph_api.stream" in _json_dumpb_dataclass_bypass_modules
     assert "langgraph_api.webhook" in _json_dumpb_dataclass_bypass_modules
+
+
+# ---------------------------------------------------------------------------
+# ProviderStreamError short-circuit — the middleware pre-bakes the envelope
+# ---------------------------------------------------------------------------
+
+
+def test_serde_default_short_circuits_on_provider_stream_error():
+    """When ``ErrorNormalizationMiddleware`` has already wrapped an
+    exception into ``ProviderStreamError``, ``serde.default`` must
+    emit the pre-baked envelope directly rather than re-running
+    provider / status / redaction inference.
+    """
+    from EvoScientist.llm.errors import ProviderStreamError
+
+    err = ProviderStreamError(
+        provider="openrouter",
+        class_qualname="openrouter.errors.foo.UnauthorizedResponseError",
+        message="User not found.",
+        status_code=401,
+    )
+    payload = _serde_mod.default(err)
+    assert payload == {
+        "error": "UnauthorizedResponseError",
+        "class": "openrouter.errors.foo.UnauthorizedResponseError",
+        "message": "User not found.",
+        "provider": "openrouter",
+        "status_code": 401,
+    }
+
+
+def test_provider_stream_error_survives_orjson_dataclass_option():
+    """End-to-end guard: a dataclass provider exception, wrapped by
+    the middleware into ``ProviderStreamError`` (non-dataclass), must
+    NOT bypass ``serde.default`` under orjson's
+    ``OPT_SERIALIZE_DATACLASS`` — that was the OpenRouter bug this
+    approach is meant to fix.
+    """
+    import dataclasses
+
+    import orjson
+
+    from EvoScientist.llm.errors import ProviderStreamError
+
+    @dataclasses.dataclass
+    class RawDataclassExc(Exception):
+        message: str
+        status_code: int
+
+        def __init__(self, message: str, status_code: int) -> None:
+            super().__init__(message)
+            object.__setattr__(self, "message", message)
+            object.__setattr__(self, "status_code", status_code)
+
+    RawDataclassExc.__module__ = "openrouter.errors.foo"
+    raw = RawDataclassExc("User not found.", 401)
+    # Sanity: the raw shape would take orjson's dataclass fast-path.
+    assert dataclasses.is_dataclass(raw)
+
+    # Middleware would wrap it; simulate the wrap directly.
+    from EvoScientist.middleware.error_normalization import _normalize
+
+    wrapped = _normalize(raw)
+    assert isinstance(wrapped, ProviderStreamError)
+
+    wire = orjson.dumps(
+        wrapped,
+        default=_serde_mod.default,
+        option=orjson.OPT_SERIALIZE_DATACLASS,
+    )
+    decoded = orjson.loads(wire)
+    # Envelope, not raw dataclass fields.
+    assert decoded["error"] == "RawDataclassExc"
+    assert decoded["provider"] == "openrouter"
+    assert decoded["status_code"] == 401
+    # Raw dataclass fields like ``headers`` / ``raw_response`` / ``data``
+    # must not appear — those are the OpenRouter-specific leaks.
+    assert "headers" not in decoded
+    assert "raw_response" not in decoded
