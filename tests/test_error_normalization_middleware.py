@@ -90,7 +90,6 @@ class TestNormalize:
         assert isinstance(wrapped, ProviderStreamError)
         assert wrapped.provider == "openai"
         assert wrapped.status_code == 429
-        assert wrapped.original is exc
 
     def test_openai_routed_deepseek_tagged_by_base_url(self):
         req = _request(_openai_model(base_url="https://api.deepseek.com"))
@@ -274,7 +273,7 @@ class TestMiddleware:
         with pytest.raises(ProviderStreamError) as excinfo:
             self._run_awrap(mw, req, handler)
         assert excinfo.value.provider == "openrouter"
-        assert excinfo.value.original is raised
+        assert excinfo.value.__cause__ is raised
 
     def test_awrap_passes_through_non_provider_model_exception(self):
         """If the model isn't a recognized provider SDK, the exception
@@ -290,6 +289,50 @@ class TestMiddleware:
         with pytest.raises(Exception, match="boom") as excinfo:
             self._run_awrap(mw, req, handler)
         assert excinfo.value is raised
+
+    def _langgraph_error_samples(self):
+        """Instances covering both branches of ``_should_pass_through``:
+        control-flow (``GraphBubbleUp`` + subclasses) and structural
+        errors. Constructor signatures vary — some need positional
+        args — so build each explicitly.
+        """
+        from langgraph.errors import (
+            EmptyInputError,
+            GraphBubbleUp,
+            GraphInterrupt,
+            InvalidUpdateError,
+            NodeTimeoutError,
+            TaskNotFound,
+        )
+
+        return [
+            GraphBubbleUp(),
+            GraphInterrupt(),
+            InvalidUpdateError("bad update"),
+            EmptyInputError("no input"),
+            TaskNotFound(),
+            NodeTimeoutError("node-x", 1.5, kind="run", run_timeout=1.0),
+        ]
+
+    def test_awrap_passes_through_langgraph_errors(self):
+        """Exceptions from ``langgraph.errors.*`` must propagate
+        untouched even when the model is a recognized provider —
+        they're either control-flow signals (interrupts, HITL) or
+        graph-level structural errors, neither is a provider incident.
+        """
+        req = _request(_openrouter_model())  # recognized — would normally wrap
+        mw = ErrorNormalizationMiddleware()
+
+        for raised in self._langgraph_error_samples():
+
+            async def handler(_req, _r=raised):
+                raise _r
+
+            with pytest.raises(type(raised)) as excinfo:
+                self._run_awrap(mw, req, handler)
+            assert excinfo.value is raised, (
+                f"{type(raised).__name__} got wrapped instead of propagated"
+            )
 
     def test_awrap_wraps_any_exception_from_recognized_model(self):
         """Any exception raised inside a call to a provider-recognized
@@ -312,7 +355,7 @@ class TestMiddleware:
         with pytest.raises(ProviderStreamError) as excinfo:
             self._run_awrap(mw, req, handler)
         assert excinfo.value.provider == "openai"
-        assert excinfo.value.original is raised
+        assert excinfo.value.__cause__ is raised
         assert excinfo.value.class_qualname == "builtins.RuntimeError"
 
     def test_sync_wrap_normalizes_provider_exception(self):

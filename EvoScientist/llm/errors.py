@@ -42,12 +42,14 @@ class ProviderStreamError(Exception):
       / ``deepseek`` / ``openrouter`` / ``openai_compat`` / …)
     - ``class_qualname`` — fully qualified name of the underlying
       exception's class (e.g. ``openrouter.errors.…``)
-    - ``message`` — API-key-redacted ``str(original)``
+    - ``message`` — API-key-redacted ``str(exc)``
     - ``status_code`` — HTTP status if the SDK exposed one
     - ``code`` — provider error code (``insufficient_quota``, …)
     - ``err_type`` — provider error type label (openai's ``.type``)
     - ``request_id`` — SDK-provided correlation id
-    - ``original`` — the underlying exception, for chaining / debug
+
+    The underlying exception is available via ``__cause__`` (set by
+    ``raise ProviderStreamError(...) from exc`` in the middleware).
     """
 
     def __init__(
@@ -60,7 +62,6 @@ class ProviderStreamError(Exception):
         code: str | None = None,
         err_type: str | None = None,
         request_id: str | None = None,
-        original: BaseException | None = None,
     ) -> None:
         super().__init__(message)
         self.provider = provider
@@ -70,7 +71,6 @@ class ProviderStreamError(Exception):
         self.code = code
         self.err_type = err_type
         self.request_id = request_id
-        self.original = original
 
     def as_envelope(self) -> dict[str, Any]:
         """Return the SSE envelope dict — the shape the WebUI consumes."""
@@ -158,13 +158,14 @@ def _redact_api_keys(message: str) -> str:
 # Host → concrete provider. Hand-maintained snapshot mirroring the
 # routed-provider tables in ``llm/models.py``
 # (``_OPENAI_ROUTED_PROVIDERS`` + ``_ANTHROPIC_ROUTED_PROVIDERS``).
-# Kept here rather than imported from ``models.py`` because
-# ``models.py`` imports FROM this package's ``patches.py`` — a
-# reverse import back through ``models.py`` would circular. Consumed
-# by ``_lookup_host_or_compat``; unknown hosts fall back to
-# ``<module>_compat`` so the WebUI knows "openai/anthropic SDK, but
-# not native" instead of getting a misleading concrete tag. Update
-# when a new routed provider is added to ``models.py``.
+# Kept here rather than imported from ``models.py`` to keep the
+# import surface of ``errors.py`` minimal — importing ``models.py``
+# would pull in every langchain chat-model client at first
+# middleware access. Consumed by ``_lookup_host_or_compat``; unknown
+# hosts fall back to ``<module>_compat`` so the WebUI knows
+# "openai/anthropic SDK, but not native" instead of getting a
+# misleading concrete tag. Update when a new routed provider is
+# added to ``models.py``.
 #
 # Related sibling: ``_PROVIDER_EXC_MODULE_PREFIXES`` in
 # ``middleware/error_normalization.py`` — the exception-side

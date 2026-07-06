@@ -46,6 +46,34 @@ if TYPE_CHECKING:
     from ..llm.errors import ProviderStreamError
 
 
+def _should_pass_through(exc: BaseException) -> bool:
+    """True if *exc* is a LangGraph-level signal that must propagate
+    untouched — either a control-flow signal or a structural error
+    that isn't a provider failure.
+
+    Covers everything in ``langgraph.errors.*``:
+
+    - **Control flow** (breaking these would corrupt the interrupt /
+      resume protocol): ``GraphBubbleUp`` and its subclasses
+      ``GraphInterrupt``, ``NodeInterrupt``, ``ParentCommand``,
+      ``GraphDrained``.
+    - **Structural** (wrapping would mis-attribute a graph-level
+      issue as a provider failure): ``InvalidUpdateError``,
+      ``EmptyInputError``, ``EmptyChannelError``, ``TaskNotFound``,
+      ``GraphRecursionError``, ``NodeCancelledError``,
+      ``NodeTimeoutError``.
+
+    Symmetric with upstream ``langgraph_api.serde.default``'s
+    whitelist, which also exposes these classes' ``str(exc)`` untouched
+    rather than swallowing them behind a provider envelope.
+
+    ``KeyboardInterrupt``, ``SystemExit``, and ``asyncio.CancelledError``
+    are handled implicitly by catching ``Exception`` — they inherit
+    from ``BaseException``.
+    """
+    return (type(exc).__module__ or "").startswith("langgraph.errors")
+
+
 # Module prefixes for provider SDK exceptions. Consumed by
 # ``_is_provider_error`` to decide whether an exception raised inside
 # a model call should surface as a provider incident or gracefully
@@ -133,7 +161,6 @@ def _normalize(request: ModelRequest, exc: BaseException) -> ProviderStreamError
         code=_extract_provider_code(exc),
         err_type=_extract_error_type(exc),
         request_id=request_id,
-        original=exc,
     )
 
 
@@ -155,7 +182,9 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
     ) -> ModelResponse:
         try:
             return handler(request)
-        except BaseException as exc:
+        except Exception as exc:
+            if _should_pass_through(exc):
+                raise
             normalized = _normalize(request, exc)
             if normalized is None:
                 raise
@@ -168,7 +197,9 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
     ) -> ModelResponse:
         try:
             return await handler(request)
-        except BaseException as exc:
+        except Exception as exc:
+            if _should_pass_through(exc):
+                raise
             normalized = _normalize(request, exc)
             if normalized is None:
                 raise
