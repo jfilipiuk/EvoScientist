@@ -148,10 +148,12 @@ def skill_manager(
                 f"Use action='list' with include_system=True to see all available skills."
             )
         tags_str = f"\nTags: {', '.join(info.tags)}" if info.tags else ""
-        # Virtual-mount invocation shape. The `Path:` above is the host
-        # path (useful for skill authors editing the source); the agent
-        # runs the skill from `/skills/<name>/...`, which is what both
-        # `execute` and the filesystem tools resolve.
+        # Host path is intentionally omitted from the agent-visible output.
+        # Surfacing it (`Path: /home/.../EvoScientist/skills/<name>`) invited
+        # `cd <host-path> && …` chains that fail in the sandbox (the workspace
+        # cwd is a different directory, and `cd` doesn't persist across execute
+        # calls anyway). The `Invoke:` block below gives the only forms that
+        # actually work.
         invoke_lines = [f"read_file /skills/{info.name}/SKILL.md"]
         cli_script = info.path / "scripts" / "cli.py"
         if cli_script.exists():
@@ -162,8 +164,7 @@ def skill_manager(
         return (
             f"Name: {info.name}\n"
             f"Description: {info.description}\n"
-            f"Source: {info.source}\n"
-            f"Path: {info.path}{tags_str}{invoke_str}"
+            f"Source: {info.source}{tags_str}{invoke_str}"
         )
 
     else:

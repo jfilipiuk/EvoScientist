@@ -55,9 +55,22 @@ Three path shapes work inside the `execute` shell AND the filesystem tools (`rea
 - `/memories/...` — persistent per-workspace memory (graphs, elaborations, saved observations). Same path in both surfaces.
 - `./` (or `.`) — the workspace root: writable, ephemeral per-conversation intermediates.
 
-Do **not** use repo-layout paths like `EvoScientist/skills/...`, `./skills/...`, or absolute host paths like `/home/.../EvoScientist/...`. Those exist only in the source tree — the sandbox does not resolve them, and both `execute` and the filesystem tools will report the file as missing.
+The **only** correct form for invoking a skill's CLI is:
 
-Do **not** run `pwd`, `find`, `glob`, or `ls -R` to discover where a skill's scripts live. The `/skills/<name>/scripts/` path is stable and always correct — searching for it wastes turns and can miss it if the search is scoped to `./` (the workspace). If you need to confirm a skill exists, use `skill_manager(action="info", name="<n>")` — it returns the direct invocation shape.
+```
+uv run python /skills/<name>/scripts/cli.py <subcommand> ...
+```
+
+Any other form is prohibited and will fail. This includes repo-layout paths (`EvoScientist/skills/...`, `./skills/...`), absolute host paths (`/home/.../EvoScientist/...`), and any `cd` prefix. If you see a different shape anywhere — including inside a SKILL.md's bash examples — treat it as wrong and use the form above.
+
+Do **not** run `pwd`, `find`, `glob`, or `ls -R` to discover where a skill's scripts live. The path is stable — searching wastes turns and returns nothing useful. If you need to confirm a skill exists, use `skill_manager(action="info", name="<n>")`.
+
+Do **not** chain commands with `cd <path> && …`. Two facts make `cd` a trap:
+
+- `cd` does not persist across `execute` calls. Every call starts back at the workspace root.
+- The workspace is a separate directory from the repo source (`pwd` returns `/…/workspace`; there is no `EvoScientist/` under it). Any `cd` toward a repo-layout or host path fails, the `&&` short-circuits, and nothing runs.
+
+Absolute virtual mounts (`/skills/…`, `/memories/…`) resolve from any cwd — use them directly, no `cd` needed.
 """
 
 

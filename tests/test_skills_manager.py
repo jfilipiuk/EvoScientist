@@ -1024,3 +1024,32 @@ class TestSkillManagerInfo:
         # No cli.py → no execute line. Regression guard: don't advertise
         # a script the agent will then fail to run.
         assert "cli.py" not in result
+
+    def test_info_omits_host_path(self, tmp_path):
+        """Host path (``/home/.../EvoScientist/skills/<name>``) must NOT appear.
+
+        Surfacing it invited `cd <host-path> && …` chains in the agent output
+        (see notes/paths debugging — the workspace cwd is a different directory
+        from the source tree, and `cd` doesn't persist across execute calls
+        anyway). Only the virtual-mount forms in the ``Invoke:`` block should
+        appear.
+        """
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        self._make_skill_with_cli(tmp_path, "check-no-host-path")
+        install_skill(str(tmp_path / "check-no-host-path"), str(workspace_dir))
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", tmp_path / "global-empty"),
+        ):
+            (tmp_path / "global-empty").mkdir()
+            result = skill_manager.invoke(
+                {"action": "info", "name": "check-no-host-path"}
+            )
+
+        # No `Path:` label line and no host filesystem string.
+        assert "\nPath:" not in result
+        assert str(tmp_path) not in result
