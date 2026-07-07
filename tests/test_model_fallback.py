@@ -271,6 +271,42 @@ class TestTryFallbacks:
         assert exc_info.value.provider == "moonshot"
         assert "quota exceeded" in exc_info.value.message
 
+    def test_langgraph_error_at_fallback_raise_point_passes_through(self):
+        """Regression: ``_raise_normalized`` calls ``_normalize``
+        directly, so its ``_should_pass_through`` gate must fire even
+        without the ``ErrorNormalizationMiddleware`` wrap sites' own
+        check. Prevents a ``langgraph.errors.*`` exception hitting the
+        fallback chain from being wrapped as a provider incident.
+        """
+        from langgraph.errors import InvalidUpdateError
+
+        add_fallback("fb-a", "prov-a")
+        req = _fake_request()
+
+        # Use a recognized-provider model so ``_provider_from_model``
+        # wouldn't short-circuit — the guard has to come from
+        # ``_should_pass_through``, not the provider check.
+        cls = type(
+            "ChatOpenAI", (), {"__module__": "langchain_openai.chat_models.base"}
+        )
+        model = cls()
+        model.openai_api_base = None
+        req.model = model
+        req.override = MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(model=kw.get("model", req.model))
+        )
+
+        raised = InvalidUpdateError("state mismatch")
+
+        async def _invoke(_r):
+            raise raised
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = model
+            with pytest.raises(InvalidUpdateError) as exc_info:
+                _run(_try_fallbacks(req, _invoke, Exception("primary failed")))
+        assert exc_info.value is raised
+
 
 # ═════════════════════════════════════════════════════════════════
 # 3. _guard_and_fallback — pre-check before chain walk

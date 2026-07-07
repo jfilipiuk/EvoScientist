@@ -123,6 +123,17 @@ def _normalize(request: ModelRequest, exc: BaseException) -> ProviderStreamError
     class / URL. Status / code / redaction still come from the raised
     exception because those fields are populated by the SDK at raise
     time.
+
+    Returns ``None`` (caller re-raises unchanged) for:
+
+    - Already-normalized wrappers (would double-attribute).
+    - LangGraph control-flow / structural errors — see
+      ``_should_pass_through``. This gate lives here so every caller
+      of ``_normalize`` (not just the wrap sites of this middleware)
+      gets the protection automatically. Notably
+      ``ModelFallbackMiddleware`` also calls ``_normalize`` at the
+      raise point of its fallback chain.
+    - Models we don't recognize as a provider SDK.
     """
     from ..llm.errors import (
         ProviderStreamError,
@@ -137,6 +148,11 @@ def _normalize(request: ModelRequest, exc: BaseException) -> ProviderStreamError
     # the actual failing model rather than the original request's model).
     # Pass through — re-wrapping would double-attribute.
     if isinstance(exc, ProviderStreamError):
+        return None
+
+    # LangGraph control-flow / structural signals must propagate
+    # untouched, regardless of which caller invoked us.
+    if _should_pass_through(exc):
         return None
 
     provider = _provider_from_model(getattr(request, "model", None))
@@ -183,8 +199,6 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
         try:
             return handler(request)
         except Exception as exc:
-            if _should_pass_through(exc):
-                raise
             normalized = _normalize(request, exc)
             if normalized is None:
                 raise
@@ -198,8 +212,6 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
         try:
             return await handler(request)
         except Exception as exc:
-            if _should_pass_through(exc):
-                raise
             normalized = _normalize(request, exc)
             if normalized is None:
                 raise
