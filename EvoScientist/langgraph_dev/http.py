@@ -25,12 +25,14 @@ from __future__ import annotations
 import asyncio
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
 from EvoScientist.llm.models import list_model_picker_entries
+from EvoScientist.middleware.run_stream_dedup import RunStreamDedupMiddleware
 
 
 async def get_models(_request: Request) -> JSONResponse:
@@ -75,8 +77,17 @@ async def get_models(_request: Request) -> JSONResponse:
     )
 
 
+# ``middleware`` on this Starlette sub-app is harvested by ``langgraph_api``
+# as ``user_router.user_middleware`` (see ``langgraph_api/server.py``) and
+# applied globally as the outermost layer. That's exactly where the
+# duplicate-``/runs/stream`` dedup needs to sit: it intercepts POSTs
+# before ``protected_mount``'s cancel-and-restart handler observes them.
+# See ``EvoScientist/middleware/run_stream_dedup.py`` for the mechanism.
 app = Starlette(
     routes=[
         Route("/api/models", get_models, methods=["GET"]),
-    ]
+    ],
+    middleware=[
+        Middleware(RunStreamDedupMiddleware),
+    ],
 )
