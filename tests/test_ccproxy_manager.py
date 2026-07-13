@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from EvoScientist.ccproxy_manager import (
+    _CCPROXY_AUTH_TIMEOUT_SECONDS,
+    _CCPROXY_HEALTH_TIMEOUT_SECONDS,
     check_ccproxy_auth,
     ensure_ccproxy,
     is_ccproxy_available,
@@ -52,6 +54,8 @@ class TestCheckCcproxyAuth:
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
         assert cmd[1:] == ["auth", "status", "claude_api"]
+        # ccproxy CLI cold start takes ~10s; timeout must leave headroom
+        assert mock_run.call_args[1]["timeout"] == _CCPROXY_AUTH_TIMEOUT_SECONDS
 
     @patch("subprocess.run")
     def test_valid_auth_codex(self, mock_run):
@@ -123,9 +127,10 @@ class TestIsCcproxyRunning:
 
 
 class TestStartCcproxy:
+    @patch("EvoScientist.ccproxy_manager.logger.warning")
     @patch("EvoScientist.ccproxy_manager.is_ccproxy_running")
     @patch("subprocess.Popen")
-    def test_success(self, mock_popen, mock_running):
+    def test_success(self, mock_popen, mock_running, mock_warning):
         proc = MagicMock()
         proc.poll.return_value = None
         mock_popen.return_value = proc
@@ -134,6 +139,11 @@ class TestStartCcproxy:
 
         result = start_ccproxy(8000)
         assert result is proc
+        mock_warning.assert_called_once_with(
+            "Starting ccproxy on port %d; first startup may take up to %d seconds",
+            8000,
+            _CCPROXY_HEALTH_TIMEOUT_SECONDS,
+        )
 
     @patch("EvoScientist.ccproxy_manager.is_ccproxy_running", return_value=False)
     @patch("EvoScientist.ccproxy_manager.time")
@@ -143,7 +153,11 @@ class TestStartCcproxy:
         proc.poll.return_value = None
         mock_popen.return_value = proc
         # Simulate time passing beyond deadline
-        mock_time.monotonic.side_effect = [0, 0, 31]
+        mock_time.monotonic.side_effect = [
+            0,
+            0,
+            _CCPROXY_HEALTH_TIMEOUT_SECONDS + 1,
+        ]
         mock_time.sleep = MagicMock()
 
         with pytest.raises(RuntimeError, match="did not become healthy"):

@@ -20,6 +20,9 @@ from EvoScientist.config import EvoScientistConfig
 
 logger = logging.getLogger(__name__)
 
+_CCPROXY_AUTH_TIMEOUT_SECONDS = 30
+_CCPROXY_HEALTH_TIMEOUT_SECONDS = 180
+
 
 # =============================================================================
 # Availability & auth checks
@@ -127,7 +130,11 @@ def check_ccproxy_auth(provider: str = "claude_api") -> tuple[bool, str]:
             [exe, "auth", "status", provider],
             capture_output=True,
             text=True,
-            timeout=10,
+            # ccproxy's CLI initializes its full plugin system on every
+            # invocation — a cold start takes ~10s on Apple Silicon, so a
+            # 10s timeout made OAuth startup fail intermittently with
+            # "Auth check timed out".
+            timeout=_CCPROXY_AUTH_TIMEOUT_SECONDS,
         )
         import re as _re
 
@@ -186,18 +193,23 @@ def start_ccproxy(port: int) -> subprocess.Popen:
         The Popen handle for the ccproxy process.
 
     Raises:
-        RuntimeError: If ccproxy fails to become healthy within 30 seconds.
+        RuntimeError: If ccproxy fails to become healthy within
+            ``_CCPROXY_HEALTH_TIMEOUT_SECONDS``.
         FileNotFoundError: If ccproxy binary is not found.
     """
     exe = _ccproxy_exe() or "ccproxy"
+    logger.warning(
+        "Starting ccproxy on port %d; first startup may take up to %d seconds",
+        port,
+        _CCPROXY_HEALTH_TIMEOUT_SECONDS,
+    )
     proc = subprocess.Popen(
         [exe, "serve", "--port", str(port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
 
-    # Wait for health (ccproxy can take up to ~11s on first start)
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + _CCPROXY_HEALTH_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(
@@ -213,7 +225,10 @@ def start_ccproxy(port: int) -> subprocess.Popen:
         proc.wait(timeout=3)
     except subprocess.TimeoutExpired:
         proc.kill()
-    raise RuntimeError("ccproxy did not become healthy within 30 seconds")
+    raise RuntimeError(
+        "ccproxy did not become healthy within "
+        f"{_CCPROXY_HEALTH_TIMEOUT_SECONDS} seconds"
+    )
 
 
 def stop_ccproxy(proc: subprocess.Popen | None) -> None:
