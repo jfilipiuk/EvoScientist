@@ -133,8 +133,15 @@ def _normalize(request: ModelRequest, exc: BaseException) -> ProviderStreamError
       gets the protection automatically. Notably
       ``ModelFallbackMiddleware`` also calls ``_normalize`` at the
       raise point of its fallback chain.
+    - ``ContextOverflowError`` — a cross-layer control signal that
+      deepagents' ``SummarizationMiddleware`` catches by type from
+      **outside** the user middleware stack to compress history and
+      retry. Wrapping it here would change the type and break that
+      self-healing fallback.
     - Models we don't recognize as a provider SDK.
     """
+    from langchain_core.exceptions import ContextOverflowError
+
     from ..llm.errors import (
         ProviderStreamError,
         _extract_error_type,
@@ -153,6 +160,11 @@ def _normalize(request: ModelRequest, exc: BaseException) -> ProviderStreamError
     # LangGraph control-flow / structural signals must propagate
     # untouched, regardless of which caller invoked us.
     if _should_pass_through(exc):
+        return None
+
+    # SummarizationMiddleware sits outside our stack and catches this
+    # by exact type to trigger reactive history compression + retry.
+    if isinstance(exc, ContextOverflowError):
         return None
 
     provider = _provider_from_model(getattr(request, "model", None))

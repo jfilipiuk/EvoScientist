@@ -334,6 +334,27 @@ class TestMiddleware:
                 f"{type(raised).__name__} got wrapped instead of propagated"
             )
 
+    def test_awrap_passes_through_context_overflow_error(self):
+        """``ContextOverflowError`` is a cross-layer control signal:
+        deepagents' ``SummarizationMiddleware`` sits outside our stack
+        and catches it by type to compress history and retry. Wrapping
+        it here would change the type and break that self-healing
+        fallback — regressing to a user-visible ``ProviderStreamError``
+        on any long conversation.
+        """
+        from langchain_core.exceptions import ContextOverflowError
+
+        raised = ContextOverflowError("context length exceeded")
+
+        async def handler(_req):
+            raise raised
+
+        req = _request(_openrouter_model())  # recognized — would normally wrap
+        mw = ErrorNormalizationMiddleware()
+        with pytest.raises(ContextOverflowError) as excinfo:
+            self._run_awrap(mw, req, handler)
+        assert excinfo.value is raised
+
     def test_awrap_wraps_any_exception_from_recognized_model(self):
         """Any exception raised inside a call to a provider-recognized
         model gets wrapped — including builtins like ``RuntimeError``.
