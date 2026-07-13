@@ -288,7 +288,9 @@ class EvoScientistConfig:
     # a deploy-style langgraph server instead of the in-terminal CLI/TUI.
     ui_backend: Literal["cli", "tui", "webui"] = "tui"
     log_level: str = "warning"
-    reasoning_effort: str = "high"
+    # Empty means use the provider/model default. A non-empty value is an
+    # explicit user override exported as EVOSCIENTIST_REASONING_EFFORT.
+    reasoning_effort: str = ""
     # Anthropic prompt caching for OpenRouter anthropic/* models. Opt out if
     # cache-write costs outweigh the benefit for a workflow.
     openrouter_anthropic_prompt_cache: bool = True

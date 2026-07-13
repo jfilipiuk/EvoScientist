@@ -130,7 +130,7 @@ class TestEvoScientistConfig:
         assert config.show_thinking is True
         assert config.ui_backend == "tui"
         assert config.log_level == "warning"
-        assert config.reasoning_effort == "high"
+        assert config.reasoning_effort == ""
         assert config.openrouter_anthropic_prompt_cache is True
         assert config.openrouter_http_referer == (
             "https://github.com/EvoScientist/EvoScientist"
