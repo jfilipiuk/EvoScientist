@@ -63,7 +63,7 @@ uv run python /skills/<name>/scripts/cli.py <subcommand> ...
 
 Any other form is prohibited and will fail. This includes repo-layout paths (`EvoScientist/skills/...`, `./skills/...`), absolute host paths (`/home/.../EvoScientist/...`), and any `cd` prefix. If you see a different shape anywhere — including inside a SKILL.md's bash examples — treat it as wrong and use the form above.
 
-Do **not** run `pwd`, `find`, `glob`, or `ls -R` to discover where a skill's scripts live. The path is stable — searching wastes turns and returns nothing useful. If you need to confirm a skill exists, use `skill_manager(action="info", name="<n>")`.
+Do **not** run `pwd`, `find`, `glob`, or `ls -R` to discover where a skill's scripts live. The path is stable — searching wastes turns and returns nothing useful. If you need to confirm a skill exists, use `skill_manager(action="info", name="<name>")`.
 
 Do **not** chain commands with `cd <path> && …`. Two facts make `cd` a trap:
 

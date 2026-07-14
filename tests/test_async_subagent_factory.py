@@ -313,3 +313,115 @@ def test_async_subagent_disables_tool_selector_stream_tracking(
 
     mock_tool_selector.assert_called_once()
     assert mock_tool_selector.call_args.kwargs["track_stream_selection"] is False
+
+
+@patch("deepagents.create_deep_agent")
+@patch("EvoScientist.EvoScientist._load_mcp_tools_cached", return_value={})
+@patch("EvoScientist.EvoScientist._get_default_middleware", return_value=[])
+@patch("EvoScientist.EvoScientist._get_default_backend")
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.utils.load_subagents")
+@patch("EvoScientist.config.apply_config_to_env")
+@patch("EvoScientist.config.get_effective_config")
+def test_factory_prepends_sandbox_path_map_in_sandbox_mode(
+    mock_get_cfg,
+    mock_apply_env,
+    mock_load_subs,
+    mock_chat,
+    mock_backend,
+    mock_get_mw,
+    mock_mcp,
+    mock_create,
+):
+    """Sandbox-mode sub-agents get ``SANDBOX_PATH_MAP`` prepended to
+    their ``system_prompt``.
+
+    Without this, sub-agents that hold ``skill_manager`` and mount
+    ``/skills/`` reproduce the same "burn 20 turns hunting for skill
+    scripts" failure mode the main agent's ``SANDBOX_PATH_MAP`` was
+    added to close.
+    """
+    cfg = MagicMock()
+    cfg.recursion_limit = 1_000_000
+    cfg.memory_profile_enabled = True
+    cfg.memory_observations_enabled = True
+    cfg.memory_observation_writer = MemoryObservationWriter.ALL
+    cfg.memory_workers_enabled = True
+    cfg.dangerous_mode = False
+    mock_get_cfg.return_value = cfg
+    mock_load_subs.return_value = [
+        {
+            "name": "writing-agent",
+            "system_prompt": "You are a writing agent.",
+            "tools": [],
+            "skills": None,
+        }
+    ]
+    mock_create.return_value.with_config.return_value = MagicMock()
+
+    from EvoScientist.subagents._factory import build_async_subagent_graph
+
+    build_async_subagent_graph("writing-agent")
+
+    system_prompt = mock_create.call_args.kwargs["system_prompt"]
+    assert "# Sandbox Paths" in system_prompt
+    assert "/skills/<name>/" in system_prompt
+    # Original spec system_prompt must still be there — the prepend
+    # augments, doesn't replace.
+    assert "You are a writing agent." in system_prompt
+    # Ordering: sandbox map appears before the spec prompt so the agent
+    # reads path guidance before workflow.
+    assert system_prompt.find("# Sandbox Paths") < system_prompt.find(
+        "You are a writing agent."
+    )
+
+
+@patch("deepagents.create_deep_agent")
+@patch("EvoScientist.EvoScientist._load_mcp_tools_cached", return_value={})
+@patch("EvoScientist.EvoScientist._get_default_middleware", return_value=[])
+@patch("EvoScientist.EvoScientist._get_default_backend")
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.utils.load_subagents")
+@patch("EvoScientist.config.apply_config_to_env")
+@patch("EvoScientist.config.get_effective_config")
+def test_factory_omits_sandbox_path_map_in_dangerous_mode(
+    mock_get_cfg,
+    mock_apply_env,
+    mock_load_subs,
+    mock_chat,
+    mock_backend,
+    mock_get_mw,
+    mock_mcp,
+    mock_create,
+):
+    """Dangerous-mode sub-agents skip ``SANDBOX_PATH_MAP``.
+
+    Dangerous mode operates on the real filesystem — virtual mounts
+    don't exist there, so shipping the sandbox-path section would
+    mislead the agent.
+    """
+    cfg = MagicMock()
+    cfg.recursion_limit = 1_000_000
+    cfg.memory_profile_enabled = True
+    cfg.memory_observations_enabled = True
+    cfg.memory_observation_writer = MemoryObservationWriter.ALL
+    cfg.memory_workers_enabled = True
+    cfg.dangerous_mode = True
+    mock_get_cfg.return_value = cfg
+    mock_load_subs.return_value = [
+        {
+            "name": "writing-agent",
+            "system_prompt": "You are a writing agent.",
+            "tools": [],
+            "skills": None,
+        }
+    ]
+    mock_create.return_value.with_config.return_value = MagicMock()
+
+    from EvoScientist.subagents._factory import build_async_subagent_graph
+
+    build_async_subagent_graph("writing-agent")
+
+    system_prompt = mock_create.call_args.kwargs["system_prompt"]
+    assert "# Sandbox Paths" not in system_prompt
+    assert system_prompt == "You are a writing agent."

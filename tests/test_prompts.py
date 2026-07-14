@@ -99,10 +99,10 @@ class TestGetSystemPrompt:
     def test_sandbox_path_map_included_in_sandbox_mode(self):
         """The virtual-mount guide must ship in sandbox mode.
 
-        Regression guard for `notes/paths1.json` — agents burned ~20 turns
-        exploring for skill scripts because SKILL.md documents repo-layout
-        paths (`EvoScientist/skills/...`) that don't exist in the sandbox.
-        The `# Sandbox Paths` section names the correct shape upfront.
+        Regression guard: agents were burning turns exploring for skill
+        scripts because SKILL.md documents repo-layout paths
+        (``EvoScientist/skills/...``) that don't exist in the sandbox.
+        The ``# Sandbox Paths`` section names the correct shape upfront.
         """
         result = get_system_prompt(dangerous=False)
         assert "# Sandbox Paths" in result

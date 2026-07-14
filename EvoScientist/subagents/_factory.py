@@ -113,10 +113,27 @@ def build_async_subagent_graph(name: str) -> Any:
         _ensure_auxiliary_chat_model() if name == "scheduler" else _ensure_chat_model()
     )
 
+    # Prepend the sandbox path-map to the sub-agent's prompt (sandbox mode
+    # only). Sub-agents hold ``skill_manager`` and mount ``/skills/`` the same
+    # way the main agent does; without this section they hit the same failure
+    # mode the main agent's ``SANDBOX_PATH_MAP`` closes — agents probing
+    # ``EvoScientist/skills/...`` / ``./skills/...`` repo-layout paths that
+    # don't resolve in the sandbox, then burning turns on ``find`` /
+    # ``glob`` / ``ls -R`` searches for stable-and-known script locations.
+    # Dangerous mode operates on the real filesystem — no virtual mounts, so
+    # the section would mislead there.
+    from EvoScientist.prompts import SANDBOX_PATH_MAP
+
+    subagent_system_prompt = spec.get("system_prompt", "")
+    if not cfg.dangerous_mode:
+        subagent_system_prompt = (
+            SANDBOX_PATH_MAP + "\n\n" + subagent_system_prompt
+        ).strip()
+
     return create_deep_agent(
         name=name,
         model=model,
-        system_prompt=spec.get("system_prompt", ""),
+        system_prompt=subagent_system_prompt,
         tools=spec.get("tools", []) + agent_mcp_tools,
         skills=spec.get("skills"),
         backend=_get_default_backend(),

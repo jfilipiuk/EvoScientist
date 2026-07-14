@@ -1028,11 +1028,10 @@ class TestSkillManagerInfo:
     def test_info_omits_host_path(self, tmp_path):
         """Host path (``/home/.../EvoScientist/skills/<name>``) must NOT appear.
 
-        Surfacing it invited `cd <host-path> && …` chains in the agent output
-        (see notes/paths debugging — the workspace cwd is a different directory
-        from the source tree, and `cd` doesn't persist across execute calls
-        anyway). Only the virtual-mount forms in the ``Invoke:`` block should
-        appear.
+        Surfacing it invited `cd <host-path> && …` chains in the agent
+        output — the workspace cwd is a different directory from the source
+        tree, and `cd` doesn't persist across execute calls anyway. Only the
+        virtual-mount forms in the ``Invoke:`` block should appear.
         """
         from EvoScientist.tools.skill_manager import skill_manager
 
@@ -1046,10 +1045,16 @@ class TestSkillManagerInfo:
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", tmp_path / "global-empty"),
         ):
             (tmp_path / "global-empty").mkdir()
+            from EvoScientist.tools.skills_manager import get_skill_info
+
+            info = get_skill_info("check-no-host-path")
             result = skill_manager.invoke(
                 {"action": "info", "name": "check-no-host-path"}
             )
 
-        # No `Path:` label line and no host filesystem string.
+        # No `Path:` label line and no leak of the actual installed path.
+        # Stronger than the pre-fix label-only check: catches any future
+        # refactor that keeps the path visible under a different label
+        # (``Local:``, ``Installed at:``, embedded in ``Source: …``).
         assert "\nPath:" not in result
-        assert str(tmp_path) not in result
+        assert str(info.path) not in result

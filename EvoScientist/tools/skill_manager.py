@@ -35,7 +35,7 @@ def skill_manager(
       Returns skill names, descriptions, tags, and install sources you can pass to action="install".
 
     action="info" (requires name):
-      Get details (description, source, path, tags) about a specific skill by name.
+      Get details (description, source, invocation forms, tags) about a specific skill by name.
       Searches both user and system skills.
 
     action="uninstall" (requires name):
@@ -68,11 +68,17 @@ def skill_manager(
             )
         result = install_skill(source)
         if result["success"]:
+            # Host path (``result['path']``) is intentionally omitted for the
+            # same reason it's omitted from the ``info`` branch below: the
+            # sandboxed agent can't ``cd`` there (workspace cwd differs, ``cd``
+            # doesn't persist across execute calls), and surfacing it invites
+            # the exact ``cd <host-path> && …`` chain the sandbox-path map
+            # exists to prevent. Point at the virtual mount instead.
             return (
                 f"Successfully installed skill: {result['name']}\n"
-                f"Description: {result.get('description', '(none)')}\n"
-                f"Path: {result['path']}\n\n"
-                f"Read its SKILL.md for full instructions."
+                f"Description: {result.get('description', '(none)')}\n\n"
+                f"Invoke:\n"
+                f"  read_file /skills/{result['name']}/SKILL.md"
             )
         else:
             return f"Failed to install skill: {result['error']}"
