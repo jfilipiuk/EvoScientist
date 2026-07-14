@@ -824,6 +824,11 @@ _bus_loop: asyncio.AbstractEventLoop | None = None
 _bus_thread: threading.Thread | None = None
 
 
+def get_channel_startup_results() -> list[tuple[str, bool, str]]:
+    """Return the current channel startup snapshot without waiting."""
+    return _manager.startup_results() if _manager is not None else []
+
+
 def _channels_is_running(channel_type: str | None = None) -> bool:
     """Check whether channels are running."""
     if _manager is None:
@@ -854,7 +859,7 @@ def _channels_stop(
 
     if channel_type is None:
         # Stop everything
-        if _bus_loop and _manager:
+        if _bus_loop and _manager and not _bus_loop.is_closed():
             try:
                 future = asyncio.run_coroutine_threadsafe(
                     _manager.stop_all(),
@@ -893,7 +898,7 @@ def _start_channels_bus_mode(
     thread_id: str,
     *,
     send_thinking: bool | None = None,
-) -> None:
+) -> list[tuple[str, bool, str]]:
     """Start all channels in bus mode with MessageBus + ChannelManager.
 
     Creates a single event loop in a daemon thread running the bus,
@@ -926,6 +931,10 @@ def _start_channels_bus_mode(
             try:
                 await mgr.start_all()
             finally:
+                # ``start_all`` returns when all channel tasks terminate. This
+                # includes immediate fatal startup failures, so tear down the
+                # dispatcher and health server before closing the bus loop.
+                await mgr.stop_all()
                 consumer.cancel()
                 try:
                     await consumer
@@ -951,6 +960,8 @@ def _start_channels_bus_mode(
         if _bus_loop is not None:
             break
         time.sleep(0.1)
+
+    return mgr.startup_results(timeout=2.0)
 
 
 def _add_channel_to_running_bus(
@@ -1208,7 +1219,7 @@ def _auto_start_channel(
     *,
     send_thinking: bool | None = None,
     runtime: ChannelRuntime | None = None,
-) -> None:
+) -> list[tuple[str, bool, str]]:
     """Start channels automatically from config (bus mode).
 
     Args:
@@ -1220,18 +1231,22 @@ def _auto_start_channel(
             is accepted for callers that don't yet pass one.
     """
     if not config.channel_enabled:
-        return
+        return []
 
-    _start_channels_bus_mode(
+    results = _start_channels_bus_mode(
         config,
         agent,
         thread_id,
         send_thinking=send_thinking,
     )
-    # Bind only after startup succeeds; a failure above must not leave
-    # a stale runtime binding pointing at channels that never started.
-    if runtime is not None:
+    # A channel that is still starting may connect later and needs the runtime
+    # binding. Immediate failures must not leave a stale binding behind.
+    from ..channels.channel_manager import CHANNEL_STARTUP_PENDING_DETAIL
+
+    has_active_channel = any(
+        ok or detail == CHANNEL_STARTUP_PENDING_DETAIL for _, ok, detail in results
+    )
+    if runtime is not None and has_active_channel:
         runtime.bind(agent, thread_id)
-    types = [t.strip() for t in config.channel_enabled.split(",") if t.strip()]
-    results = [(ct, True, "connected (bus)") for ct in types]
     _print_channel_panel(results)
+    return results
