@@ -45,6 +45,42 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
         return model.bind(**updates)
 
 
+def disable_streaming(model: BaseChatModel) -> BaseChatModel:
+    """Return a copy of the model with ``disable_streaming=True``.
+
+    ``BaseChatModel._streaming_disabled()`` (langchain_core
+    ``chat_models.py:513``) reads only the instance's Pydantic
+    ``disable_streaming`` field — the single gate before langchain routes
+    to ``_stream`` / ``_astream`` when a streaming-aware callback handler
+    is attached (which langgraph's ``astream_events(v3)`` always does).
+
+    Alternatives that don't work:
+
+    - ``model.bind(disable_streaming=True)``: puts kwargs on a
+      ``RunnableBinding``, which ``_streaming_disabled()`` doesn't read.
+      Silent no-op.
+    - ``model.streaming = False``: only honored when ``streaming`` is
+      explicitly in ``model_fields_set``. Provider defaults defeat it
+      (``ChatOpenAI.streaming=False`` is already-False and not
+      explicit-set; ``ChatGoogleGenerativeAI.streaming=None`` is falsy
+      but not ``False``).
+
+    Uses ``model_copy`` to leave the caller's reference untouched. On
+    validator failure, falls back to a shallow copy + ``setattr`` so a
+    shared/cached model instance (e.g. the main-agent model when
+    ``disable_thinking`` returned the original unchanged) is never
+    mutated in place.
+    """
+    try:
+        return model.model_copy(update={"disable_streaming": True})
+    except Exception:
+        import copy as _copy
+
+        copied = _copy.copy(model)
+        object.__setattr__(copied, "disable_streaming", True)
+        return copied
+
+
 def append_to_system_message(
     system_message: SystemMessage | None, text: str
 ) -> SystemMessage:

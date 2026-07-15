@@ -476,3 +476,97 @@ def test_tool_selector_ordering(mock_config, mock_model, mock_ts):
     te_idx = type_names.index("ToolErrorHandlerMiddleware")
     mem_idx = type_names.index("EvoMemoryMiddleware")
     assert te_idx < ts_idx < mem_idx
+
+
+# ---------------------------------------------------------------------------
+# disable_streaming — kills per-chunk selector emissions
+# ---------------------------------------------------------------------------
+
+
+def test_disable_streaming_sets_disable_streaming_field():
+    """Helper must set ``disable_streaming=True`` (BaseChatModel's official
+    hard-disable field checked by ``_streaming_disabled()``), not the
+    model's own ``streaming`` field.
+    """
+    from EvoScientist.middleware.utils import disable_streaming
+
+    model = MagicMock()
+    copied = MagicMock()
+    model.model_copy.return_value = copied
+
+    result = disable_streaming(model)
+
+    model.model_copy.assert_called_once_with(update={"disable_streaming": True})
+    assert result is copied
+
+
+def test_disable_streaming_falls_back_to_shallow_copy_on_model_copy_failure():
+    """Fallback path: ``model_copy`` fails, so we shallow-copy the passed
+    model and ``setattr`` on the copy.
+
+    Shared-instance safety: ``disable_thinking`` returns the original model
+    unchanged when no thinking/reasoning update is needed (common for
+    Gemini). If the caller's model is the process-global cached main-agent
+    model, mutating it here would silently disable streaming on the
+    main-agent's model instance — a hard-to-diagnose regression the shallow
+    copy prevents.
+    """
+    from EvoScientist.middleware.utils import disable_streaming
+
+    class _FakeModel:
+        disable_streaming = False
+
+        def model_copy(self, update):
+            raise RuntimeError("not pydantic")
+
+    model = _FakeModel()
+    result = disable_streaming(model)
+
+    assert result is not model
+    assert result.disable_streaming is True
+    # Caller instance untouched.
+    assert model.disable_streaming is False
+
+
+def test_disable_streaming_defeats_upstream_streaming_dispatch():
+    """End-to-end mechanism test: a model copy produced by
+    ``disable_streaming`` causes langchain's own ``_streaming_disabled``
+    to return True.
+
+    ``_streaming_disabled`` is the single check consulted by
+    ``_should_stream`` / ``_should_use_protocol_streaming`` before
+    dispatching to ``_stream`` / ``_astream``. If our field-setting fails
+    or a future langchain version changes the check key, this test fails
+    before the selector floods anything in production — strictly better
+    than a runtime canary.
+    """
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from EvoScientist.middleware.utils import disable_streaming
+
+    class _FakeModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "fake"
+
+        def _generate(
+            self,
+            messages,
+            stop=None,
+            run_manager=None,
+            **kwargs,
+        ) -> ChatResult:
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="ok"))]
+            )
+
+    model = _FakeModel()
+    assert model._streaming_disabled() is False
+
+    disabled = disable_streaming(model)
+
+    assert disabled._streaming_disabled() is True
+    # Original caller instance untouched.
+    assert model._streaming_disabled() is False
