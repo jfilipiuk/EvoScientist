@@ -570,3 +570,37 @@ def test_disable_streaming_defeats_upstream_streaming_dispatch():
     assert disabled._streaming_disabled() is True
     # Original caller instance untouched.
     assert model._streaming_disabled() is False
+
+
+def test_create_tool_selector_wraps_model_with_disable_streaming():
+    """Factory chains ``disable_streaming`` around ``disable_thinking``
+    so the selector's internal model call can't dispatch to
+    ``_stream`` / ``_astream``.
+    """
+    thinking_out = MagicMock(name="disable_thinking_output")
+    streaming_out = MagicMock(name="disable_streaming_output")
+
+    with (
+        patch(
+            "EvoScientist.middleware.utils.disable_thinking",
+            return_value=thinking_out,
+        ) as mock_dt,
+        patch(
+            "EvoScientist.middleware.utils.disable_streaming",
+            return_value=streaming_out,
+        ) as mock_ds,
+        patch("EvoScientist.EvoScientist._ensure_chat_model", return_value=MagicMock()),
+        patch(
+            "langchain.agents.middleware.LLMToolSelectorMiddleware",
+            return_value=MagicMock(),
+        ) as mock_selector,
+    ):
+        result = create_tool_selector_middleware(threshold=0)
+        # selector_factory is lazy — trigger it via wrap_model_call so the
+        # LLMToolSelectorMiddleware constructor actually fires and we can
+        # observe what model was passed.
+        result[0].wrap_model_call(_request([_tool("t")]), MagicMock())
+
+    mock_dt.assert_called_once()
+    mock_ds.assert_called_once_with(thinking_out)
+    assert mock_selector.call_args.kwargs["model"] is streaming_out
