@@ -709,3 +709,63 @@ async def test_hidden_selector_tags_ainvoke_with_langsmith_hidden():
     call_config = structured_model.ainvoke.call_args.kwargs.get("config")
     assert call_config is not None
     assert "langsmith:hidden" in call_config.get("tags", [])
+
+
+# ---------------------------------------------------------------------------
+# _SelectorFloodDetector — self-reports the provider quirk
+# ---------------------------------------------------------------------------
+
+
+def test_flood_detector_warns_above_threshold(caplog):
+    """Detector emits a WARNING with the count + names when tool_calls
+    length hits THRESHOLD. Proves the workaround self-reports so we can
+    tell if the provider quirk is still recurring in production."""
+    import logging as _logging
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    from EvoScientist.middleware.tool_selector import _SelectorFloodDetector
+
+    detector = _SelectorFloodDetector()
+    tool_calls = [
+        {"name": "ToolSelectionResponse", "args": {}, "id": f"id_{i}"}
+        for i in range(_SelectorFloodDetector.THRESHOLD)
+    ]
+    msg = AIMessage(content="", tool_calls=tool_calls)
+    result = LLMResult(generations=[[ChatGeneration(message=msg)]])
+
+    with caplog.at_level(
+        _logging.WARNING, logger="EvoScientist.middleware.tool_selector"
+    ):
+        detector.on_llm_end(result)
+
+    assert any("tool_selector.flood" in rec.message for rec in caplog.records)
+    assert any("ToolSelectionResponse" in rec.message for rec in caplog.records)
+
+
+def test_flood_detector_silent_below_threshold(caplog):
+    """Normal selector output (single tool_call) does not emit a warning
+    — no noise on the fast path."""
+    import logging as _logging
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    from EvoScientist.middleware.tool_selector import _SelectorFloodDetector
+
+    detector = _SelectorFloodDetector()
+    msg = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "ToolSelectionResponse", "args": {"tools": ["x"]}, "id": "id"}
+        ],
+    )
+    result = LLMResult(generations=[[ChatGeneration(message=msg)]])
+
+    with caplog.at_level(
+        _logging.WARNING, logger="EvoScientist.middleware.tool_selector"
+    ):
+        detector.on_llm_end(result)
+
+    assert not any("tool_selector.flood" in rec.message for rec in caplog.records)

@@ -30,6 +30,7 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
@@ -49,6 +50,51 @@ DEFAULT_ALWAYS_INCLUDE_TOOLS: frozenset[str] = frozenset(
         "search_observations",
     }
 )
+
+
+class _SelectorFloodDetector(BaseCallbackHandler):
+    """Log a WARNING when the selector's model returns an AIMessage with
+    an unexpectedly large ``tool_calls`` list — signal of the provider-side
+    duplicate-tool_call quirk that motivated the hidden-tag fix.
+
+    Normal selector output is one tool_call to ``ToolSelectionResponse``.
+    Anything above :attr:`THRESHOLD` is the pathology we're workarounding.
+    Runs regardless of the ``langsmith:hidden`` tag (callbacks fire on
+    every invocation; the tag only filters langgraph_api's downstream
+    yield). Ensures the workaround self-reports so we notice if the
+    provider quirk persists / worsens / gets fixed upstream.
+    """
+
+    THRESHOLD = 5
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        try:
+            for gen_list in response.generations:
+                for gen in gen_list:
+                    msg = getattr(gen, "message", None)
+                    tool_calls = getattr(msg, "tool_calls", None) or []
+                    if len(tool_calls) < self.THRESHOLD:
+                        continue
+                    names = {
+                        (
+                            tc.get("name")
+                            if isinstance(tc, dict)
+                            else getattr(tc, "name", "?")
+                        )
+                        for tc in tool_calls
+                    }
+                    logger.warning(
+                        "tool_selector.flood n_tool_calls=%d names=%s",
+                        len(tool_calls),
+                        names,
+                    )
+        except Exception:
+            # Observability must never crash the model call. Swallow any
+            # unexpected response shape silently.
+            pass
+
+
+_FLOOD_DETECTOR = _SelectorFloodDetector()
 
 
 class _HiddenLLMToolSelectorMiddleware(LLMToolSelectorMiddleware):
@@ -73,7 +119,10 @@ class _HiddenLLMToolSelectorMiddleware(LLMToolSelectorMiddleware):
     differs.
     """
 
-    _HIDDEN_CONFIG: ClassVar[dict[str, Any]] = {"tags": ["langsmith:hidden"]}
+    _INVOKE_CONFIG: ClassVar[dict[str, Any]] = {
+        "tags": ["langsmith:hidden"],
+        "callbacks": [_FLOOD_DETECTOR],
+    }
 
     def wrap_model_call(self, request, handler):
         selection_request = self._prepare_selection_request(request)
@@ -89,7 +138,7 @@ class _HiddenLLMToolSelectorMiddleware(LLMToolSelectorMiddleware):
                 {"role": "system", "content": selection_request.system_message},
                 selection_request.last_user_message,
             ],
-            config=self._HIDDEN_CONFIG,
+            config=self._INVOKE_CONFIG,
         )
         if not isinstance(response, dict):
             msg = f"Expected dict response, got {type(response)}"
@@ -116,7 +165,7 @@ class _HiddenLLMToolSelectorMiddleware(LLMToolSelectorMiddleware):
                 {"role": "system", "content": selection_request.system_message},
                 selection_request.last_user_message,
             ],
-            config=self._HIDDEN_CONFIG,
+            config=self._INVOKE_CONFIG,
         )
         if not isinstance(response, dict):
             msg = f"Expected dict response, got {type(response)}"
