@@ -89,9 +89,10 @@ class _SelectorFloodDetector(BaseCallbackHandler):
                         names,
                     )
         except Exception:
-            # Observability must never crash the model call. Swallow any
-            # unexpected response shape silently.
-            pass
+            # Observability must never crash the model call. Log at DEBUG so
+            # a real bug (e.g. langchain changing the response shape) is
+            # recoverable from the trace, while normal operation stays quiet.
+            logger.debug("flood detector traversal failed", exc_info=True)
 
 
 _FLOOD_DETECTOR = _SelectorFloodDetector()
@@ -117,6 +118,17 @@ class _HiddenLLMToolSelectorMiddleware(LLMToolSelectorMiddleware):
     ``LLMToolSelectorMiddleware`` exposes no hook for injecting the
     invoke config — only the config kwarg on ``invoke`` / ``ainvoke``
     differs.
+
+    **Upstream drift**: parent lives at
+    ``langchain/agents/middleware/tool_selection.py`` in
+    ``LLMToolSelectorMiddleware.wrap_model_call`` /
+    ``awrap_model_call``. On any langchain upgrade, diff the parent's
+    two methods against the bodies below — if the parent grows new
+    logic between ``_prepare_selection_request`` and ``handler(...)``,
+    we silently miss it. The private import of
+    ``_create_tool_selection_response`` is a natural canary (fails
+    loud at import time if the symbol moves); behavioural drift within
+    the method body is not.
     """
 
     _INVOKE_CONFIG: ClassVar[dict[str, Any]] = {

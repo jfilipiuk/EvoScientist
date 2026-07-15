@@ -514,7 +514,13 @@ def test_disable_streaming_falls_back_to_shallow_copy_on_model_copy_failure():
     from EvoScientist.middleware.utils import disable_streaming
 
     class _FakeModel:
-        disable_streaming = False
+        def __init__(self):
+            # Instance attribute (not class attribute) so the "caller
+            # untouched" assertion below actually distinguishes a fresh
+            # copy from the original instance — a class attribute would
+            # let the test pass trivially even if the helper returned
+            # ``model`` itself.
+            self.disable_streaming = False
 
         def model_copy(self, update):
             raise RuntimeError("not pydantic")
@@ -657,6 +663,12 @@ def test_hidden_selector_tags_invoke_with_langsmith_hidden():
     call_config = structured_model.invoke.call_args.kwargs.get("config")
     assert call_config is not None
     assert "langsmith:hidden" in call_config.get("tags", [])
+    # Callback assertion: a future rebase that drops the callbacks entry
+    # would still leave the tags check green, silently killing the
+    # tool_selector.flood observability. Guard against that.
+    from EvoScientist.middleware.tool_selector import _FLOOD_DETECTOR
+
+    assert _FLOOD_DETECTOR in call_config.get("callbacks", [])
 
 
 @pytest.mark.asyncio
@@ -709,6 +721,12 @@ async def test_hidden_selector_tags_ainvoke_with_langsmith_hidden():
     call_config = structured_model.ainvoke.call_args.kwargs.get("config")
     assert call_config is not None
     assert "langsmith:hidden" in call_config.get("tags", [])
+    # Callback assertion: a future rebase that drops the callbacks entry
+    # would still leave the tags check green, silently killing the
+    # tool_selector.flood observability. Guard against that.
+    from EvoScientist.middleware.tool_selector import _FLOOD_DETECTOR
+
+    assert _FLOOD_DETECTOR in call_config.get("callbacks", [])
 
 
 # ---------------------------------------------------------------------------
