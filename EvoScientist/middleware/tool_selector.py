@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Iterable
-from typing import Any
+from typing import Any, ClassVar
 
+from langchain.agents.middleware import LLMToolSelectorMiddleware
+from langchain.agents.middleware.tool_selection import _create_tool_selection_response
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     AIMessage,
@@ -47,6 +49,85 @@ DEFAULT_ALWAYS_INCLUDE_TOOLS: frozenset[str] = frozenset(
         "search_observations",
     }
 )
+
+
+class _HiddenLLMToolSelectorMiddleware(LLMToolSelectorMiddleware):
+    """Selector middleware whose internal model call is tagged
+    ``langsmith:hidden`` so its callback events are dropped by
+    langgraph_api's SSE layer.
+
+    ``langgraph_api/stream.py:327`` unconditionally skips any event whose
+    tags contain ``langsmith:hidden``. Attaching the tag to the selector's
+    ``invoke`` / ``ainvoke`` propagates it through langchain's callback
+    dispatch to the ``on_chat_model_end`` event that langgraph captures
+    for the WebUI stream. Result: no matter what the provider returns
+    (single tool_call, thousands of duplicated tool_calls, malformed
+    args), nothing from the selector's model call reaches WebUI's action
+    panel — the selector's own ``tool_selection`` event (emitted by
+    ``EvoScientist/stream/tool_selection.py``) is what surfaces the
+    outcome instead.
+
+    Method bodies duplicate the parent because
+    ``LLMToolSelectorMiddleware`` exposes no hook for injecting the
+    invoke config — only the config kwarg on ``invoke`` / ``ainvoke``
+    differs.
+    """
+
+    _HIDDEN_CONFIG: ClassVar[dict[str, Any]] = {"tags": ["langsmith:hidden"]}
+
+    def wrap_model_call(self, request, handler):
+        selection_request = self._prepare_selection_request(request)
+        if selection_request is None:
+            return handler(request)
+        type_adapter = _create_tool_selection_response(
+            selection_request.available_tools
+        )
+        schema = type_adapter.json_schema()
+        structured_model = selection_request.model.with_structured_output(schema)
+        response = structured_model.invoke(
+            [
+                {"role": "system", "content": selection_request.system_message},
+                selection_request.last_user_message,
+            ],
+            config=self._HIDDEN_CONFIG,
+        )
+        if not isinstance(response, dict):
+            msg = f"Expected dict response, got {type(response)}"
+            raise AssertionError(msg)
+        modified_request = self._process_selection_response(
+            response,
+            selection_request.available_tools,
+            selection_request.valid_tool_names,
+            request,
+        )
+        return handler(modified_request)
+
+    async def awrap_model_call(self, request, handler):
+        selection_request = self._prepare_selection_request(request)
+        if selection_request is None:
+            return await handler(request)
+        type_adapter = _create_tool_selection_response(
+            selection_request.available_tools
+        )
+        schema = type_adapter.json_schema()
+        structured_model = selection_request.model.with_structured_output(schema)
+        response = await structured_model.ainvoke(
+            [
+                {"role": "system", "content": selection_request.system_message},
+                selection_request.last_user_message,
+            ],
+            config=self._HIDDEN_CONFIG,
+        )
+        if not isinstance(response, dict):
+            msg = f"Expected dict response, got {type(response)}"
+            raise AssertionError(msg)
+        modified_request = self._process_selection_response(
+            response,
+            selection_request.available_tools,
+            selection_request.valid_tool_names,
+            request,
+        )
+        return await handler(modified_request)
 
 
 def _tool_name(tool: BaseTool | dict[str, Any]) -> str | None:
@@ -246,8 +327,6 @@ def create_tool_selector_middleware(
     - memory tools: referenced by memory prompts; filtering them makes the
       agent unable to use memory even when the prompt tells it to
     """
-    from langchain.agents.middleware import LLMToolSelectorMiddleware
-
     from .utils import disable_streaming, disable_thinking
 
     if model is None:
@@ -266,7 +345,7 @@ def create_tool_selector_middleware(
     )
 
     def selector_factory(always_include: list[str]) -> AgentMiddleware:
-        return LLMToolSelectorMiddleware(
+        return _HiddenLLMToolSelectorMiddleware(
             model=safe_model,
             system_prompt=system_prompt,
             always_include=always_include,

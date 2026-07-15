@@ -75,7 +75,7 @@ def _factory_patches():
         ),
         patch("EvoScientist.EvoScientist._ensure_chat_model", return_value=MagicMock()),
         patch(
-            "langchain.agents.middleware.LLMToolSelectorMiddleware",
+            "EvoScientist.middleware.tool_selector._HiddenLLMToolSelectorMiddleware",
             return_value=MagicMock(),
         ),
     )
@@ -591,16 +591,121 @@ def test_create_tool_selector_wraps_model_with_disable_streaming():
         ) as mock_ds,
         patch("EvoScientist.EvoScientist._ensure_chat_model", return_value=MagicMock()),
         patch(
-            "langchain.agents.middleware.LLMToolSelectorMiddleware",
+            "EvoScientist.middleware.tool_selector._HiddenLLMToolSelectorMiddleware",
             return_value=MagicMock(),
         ) as mock_selector,
     ):
         result = create_tool_selector_middleware(threshold=0)
         # selector_factory is lazy — trigger it via wrap_model_call so the
-        # LLMToolSelectorMiddleware constructor actually fires and we can
-        # observe what model was passed.
+        # subclass constructor actually fires and we can observe what
+        # model was passed.
         result[0].wrap_model_call(_request([_tool("t")]), MagicMock())
 
     mock_dt.assert_called_once()
     mock_ds.assert_called_once_with(thinking_out)
     assert mock_selector.call_args.kwargs["model"] is streaming_out
+
+
+# ---------------------------------------------------------------------------
+# _HiddenLLMToolSelectorMiddleware — tags selector callback events hidden
+# ---------------------------------------------------------------------------
+
+
+def test_hidden_selector_tags_invoke_with_langsmith_hidden():
+    """The subclass passes ``tags=["langsmith:hidden"]`` in the config
+    argument to ``structured_model.invoke``, so langgraph_api's SSE layer
+    (``langgraph_api/stream.py:327``) drops the selector's callback events
+    before they reach WebUI.
+    """
+    from langchain_core.language_models import BaseChatModel
+
+    from EvoScientist.middleware.tool_selector import (
+        _HiddenLLMToolSelectorMiddleware,
+    )
+
+    middleware = _HiddenLLMToolSelectorMiddleware(model=MagicMock(spec=BaseChatModel))
+
+    selection_request = MagicMock()
+    selection_request.available_tools = [MagicMock(name="tool_a")]
+    selection_request.valid_tool_names = {"tool_a"}
+    selection_request.system_message = "sys"
+    selection_request.last_user_message = {"role": "user", "content": "hi"}
+
+    structured_model = MagicMock()
+    structured_model.invoke.return_value = {"tools": ["tool_a"]}
+    selection_request.model.with_structured_output.return_value = structured_model
+
+    with (
+        patch.object(
+            _HiddenLLMToolSelectorMiddleware,
+            "_prepare_selection_request",
+            return_value=selection_request,
+        ),
+        patch.object(
+            _HiddenLLMToolSelectorMiddleware,
+            "_process_selection_response",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "EvoScientist.middleware.tool_selector._create_tool_selection_response",
+            return_value=MagicMock(json_schema=MagicMock(return_value={})),
+        ),
+    ):
+        middleware.wrap_model_call(MagicMock(), MagicMock())
+
+    structured_model.invoke.assert_called_once()
+    call_config = structured_model.invoke.call_args.kwargs.get("config")
+    assert call_config is not None
+    assert "langsmith:hidden" in call_config.get("tags", [])
+
+
+@pytest.mark.asyncio
+async def test_hidden_selector_tags_ainvoke_with_langsmith_hidden():
+    """Async path also tags with ``langsmith:hidden``."""
+    from langchain_core.language_models import BaseChatModel
+
+    from EvoScientist.middleware.tool_selector import (
+        _HiddenLLMToolSelectorMiddleware,
+    )
+
+    middleware = _HiddenLLMToolSelectorMiddleware(model=MagicMock(spec=BaseChatModel))
+
+    selection_request = MagicMock()
+    selection_request.available_tools = [MagicMock(name="tool_a")]
+    selection_request.valid_tool_names = {"tool_a"}
+    selection_request.system_message = "sys"
+    selection_request.last_user_message = {"role": "user", "content": "hi"}
+
+    structured_model = MagicMock()
+
+    async def _ainvoke(*args, **kwargs):
+        return {"tools": ["tool_a"]}
+
+    structured_model.ainvoke = MagicMock(side_effect=_ainvoke)
+    selection_request.model.with_structured_output.return_value = structured_model
+
+    async def _handler(req):
+        return MagicMock()
+
+    with (
+        patch.object(
+            _HiddenLLMToolSelectorMiddleware,
+            "_prepare_selection_request",
+            return_value=selection_request,
+        ),
+        patch.object(
+            _HiddenLLMToolSelectorMiddleware,
+            "_process_selection_response",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "EvoScientist.middleware.tool_selector._create_tool_selection_response",
+            return_value=MagicMock(json_schema=MagicMock(return_value={})),
+        ),
+    ):
+        await middleware.awrap_model_call(MagicMock(), _handler)
+
+    structured_model.ainvoke.assert_called_once()
+    call_config = structured_model.ainvoke.call_args.kwargs.get("config")
+    assert call_config is not None
+    assert "langsmith:hidden" in call_config.get("tags", [])
