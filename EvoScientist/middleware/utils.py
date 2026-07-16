@@ -65,20 +65,9 @@ def disable_streaming(model: BaseChatModel) -> BaseChatModel:
       explicit-set; ``ChatGoogleGenerativeAI.streaming=None`` is falsy
       but not ``False``).
 
-    Uses ``model_copy`` to leave the caller's reference untouched. On
-    validator failure, falls back to a shallow copy + ``setattr`` so a
-    shared/cached model instance (e.g. the main-agent model when
-    ``disable_thinking`` returned the original unchanged) is never
-    mutated in place.
+    Uses ``model_copy`` to leave the caller's reference untouched.
     """
-    try:
-        return model.model_copy(update={"disable_streaming": True})
-    except Exception:
-        import copy as _copy
-
-        copied = _copy.copy(model)
-        object.__setattr__(copied, "disable_streaming", True)
-        return copied
+    return model.model_copy(update={"disable_streaming": True})
 
 
 def append_to_system_message(

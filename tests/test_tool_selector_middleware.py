@@ -67,15 +67,25 @@ def _mock_model():
 
 # Helper: patches needed to call create_tool_selector_middleware without LLM
 def _factory_patches():
+    # ``disable_thinking`` / ``disable_streaming`` are patched at the destination
+    # namespace with ``create=True`` because the factory imports them lazily.
+    # ``disable_streaming`` returns a MagicMock whose ``.model_copy`` returns
+    # itself so the tag/callback update in the factory is a safe no-op for tests
+    # that don't care about the tag wiring.
     return (
         patch(
             "EvoScientist.middleware.tool_selector.disable_thinking",
             return_value=MagicMock(),
             create=True,
         ),
+        patch(
+            "EvoScientist.middleware.tool_selector.disable_streaming",
+            return_value=MagicMock(),
+            create=True,
+        ),
         patch("EvoScientist.EvoScientist._ensure_chat_model", return_value=MagicMock()),
         patch(
-            "EvoScientist.middleware.tool_selector._HiddenLLMToolSelectorMiddleware",
+            "langchain.agents.middleware.LLMToolSelectorMiddleware",
             return_value=MagicMock(),
         ),
     )
@@ -87,8 +97,8 @@ def _factory_patches():
 
 
 def test_create_tool_selector_returns_single_middleware():
-    p1, p2, p3 = _factory_patches()
-    with p1, p2, p3:
+    p1, p2, p3, p4 = _factory_patches()
+    with p1, p2, p3, p4:
         result = create_tool_selector_middleware()
         assert isinstance(result, list)
         assert len(result) == 1
@@ -96,8 +106,8 @@ def test_create_tool_selector_returns_single_middleware():
 
 
 def test_create_tool_selector_always_include():
-    p1, p2, p3 = _factory_patches()
-    with p1, p2, p3 as mock_cls:
+    p1, p2, p3, p4 = _factory_patches()
+    with p1, p2, p3, p4 as mock_cls:
         result = create_tool_selector_middleware(threshold=0)
         request = _request(
             [
@@ -118,8 +128,8 @@ def test_create_tool_selector_always_include():
 
 
 def test_custom_threshold():
-    p1, p2, p3 = _factory_patches()
-    with p1, p2, p3:
+    p1, p2, p3, p4 = _factory_patches()
+    with p1, p2, p3, p4:
         result = create_tool_selector_middleware(threshold=5)
         assert result[0]._threshold == 5
 
@@ -500,40 +510,6 @@ def test_disable_streaming_sets_disable_streaming_field():
     assert result is copied
 
 
-def test_disable_streaming_falls_back_to_shallow_copy_on_model_copy_failure():
-    """Fallback path: ``model_copy`` fails, so we shallow-copy the passed
-    model and ``setattr`` on the copy.
-
-    Shared-instance safety: ``disable_thinking`` returns the original model
-    unchanged when no thinking/reasoning update is needed (common for
-    Gemini). If the caller's model is the process-global cached main-agent
-    model, mutating it here would silently disable streaming on the
-    main-agent's model instance — a hard-to-diagnose regression the shallow
-    copy prevents.
-    """
-    from EvoScientist.middleware.utils import disable_streaming
-
-    class _FakeModel:
-        def __init__(self):
-            # Instance attribute (not class attribute) so the "caller
-            # untouched" assertion below actually distinguishes a fresh
-            # copy from the original instance — a class attribute would
-            # let the test pass trivially even if the helper returned
-            # ``model`` itself.
-            self.disable_streaming = False
-
-        def model_copy(self, update):
-            raise RuntimeError("not pydantic")
-
-    model = _FakeModel()
-    result = disable_streaming(model)
-
-    assert result is not model
-    assert result.disable_streaming is True
-    # Caller instance untouched.
-    assert model.disable_streaming is False
-
-
 def test_disable_streaming_defeats_upstream_streaming_dispatch():
     """End-to-end mechanism test: a model copy produced by
     ``disable_streaming`` causes langchain's own ``_streaming_disabled``
@@ -578,14 +554,37 @@ def test_disable_streaming_defeats_upstream_streaming_dispatch():
     assert model._streaming_disabled() is False
 
 
-def test_create_tool_selector_wraps_model_with_disable_streaming():
-    """Factory chains ``disable_streaming`` around ``disable_thinking``
-    so the selector's internal model call can't dispatch to
-    ``_stream`` / ``_astream``.
+def test_create_tool_selector_wires_nostream_and_flood_detector_on_model():
+    """Factory chains ``disable_thinking`` → ``disable_streaming`` →
+    ``model_copy`` with the ``nostream`` tag and ``_FLOOD_DETECTOR``
+    callback, then passes the resulting model to
+    ``LLMToolSelectorMiddleware``.
+
+    Model-field wiring (over subclassing or invoke-config injection):
+    ``chat_models.py:746-750`` reads ``self.tags`` / ``self.callbacks``
+    into every ``CallbackManager.configure``, so the tag reaches
+    ``on_chat_model_start`` and langgraph's ``pregel/_messages.py:141``
+    check skips the messages emission. Callbacks propagate the same way
+    so ``_FLOOD_DETECTOR`` fires on every selector call regardless of
+    whether the tag is honored downstream.
     """
+    from EvoScientist.middleware.tool_selector import _FLOOD_DETECTOR
+
     thinking_out = MagicMock(name="disable_thinking_output")
     streaming_out = MagicMock(name="disable_streaming_output")
+    # Simulate a base model with pre-existing tags + callbacks so we can
+    # verify the factory APPENDS rather than replaces. If the factory used
+    # replace semantics, "pre_existing_tag" would be missing from the update.
+    streaming_out.tags = ["pre_existing_tag"]
+    _pre_existing_cb = MagicMock(name="pre_existing_callback")
+    streaming_out.callbacks = [_pre_existing_cb]
+    tagged_out = MagicMock(name="tagged_output")
+    streaming_out.model_copy.return_value = tagged_out
 
+    # Patch at the SOURCE module (utils) not the destination (tool_selector)
+    # because the factory does ``from .utils import ...`` lazily inside its
+    # body — patching the tool_selector namespace would be shadowed by that
+    # local import binding.
     with (
         patch(
             "EvoScientist.middleware.utils.disable_thinking",
@@ -597,136 +596,34 @@ def test_create_tool_selector_wraps_model_with_disable_streaming():
         ) as mock_ds,
         patch("EvoScientist.EvoScientist._ensure_chat_model", return_value=MagicMock()),
         patch(
-            "EvoScientist.middleware.tool_selector._HiddenLLMToolSelectorMiddleware",
+            "langchain.agents.middleware.LLMToolSelectorMiddleware",
             return_value=MagicMock(),
         ) as mock_selector,
     ):
         result = create_tool_selector_middleware(threshold=0)
         # selector_factory is lazy — trigger it via wrap_model_call so the
-        # subclass constructor actually fires and we can observe what
-        # model was passed.
+        # LLMToolSelectorMiddleware constructor actually fires and we can
+        # observe what model was passed.
         result[0].wrap_model_call(_request([_tool("t")]), MagicMock())
+
+    from langgraph.constants import TAG_NOSTREAM
 
     mock_dt.assert_called_once()
     mock_ds.assert_called_once_with(thinking_out)
-    assert mock_selector.call_args.kwargs["model"] is streaming_out
-
-
-# ---------------------------------------------------------------------------
-# _HiddenLLMToolSelectorMiddleware — tags selector callback events hidden
-# ---------------------------------------------------------------------------
-
-
-def test_hidden_selector_tags_invoke_with_langsmith_hidden():
-    """The subclass passes ``tags=["langsmith:hidden"]`` in the config
-    argument to ``structured_model.invoke``, so langgraph_api's SSE layer
-    (``langgraph_api/stream.py:327``) drops the selector's callback events
-    before they reach WebUI.
-    """
-    from langchain_core.language_models import BaseChatModel
-
-    from EvoScientist.middleware.tool_selector import (
-        _HiddenLLMToolSelectorMiddleware,
-    )
-
-    middleware = _HiddenLLMToolSelectorMiddleware(model=MagicMock(spec=BaseChatModel))
-
-    selection_request = MagicMock()
-    selection_request.available_tools = [MagicMock(name="tool_a")]
-    selection_request.valid_tool_names = {"tool_a"}
-    selection_request.system_message = "sys"
-    selection_request.last_user_message = {"role": "user", "content": "hi"}
-
-    structured_model = MagicMock()
-    structured_model.invoke.return_value = {"tools": ["tool_a"]}
-    selection_request.model.with_structured_output.return_value = structured_model
-
-    with (
-        patch.object(
-            _HiddenLLMToolSelectorMiddleware,
-            "_prepare_selection_request",
-            return_value=selection_request,
-        ),
-        patch.object(
-            _HiddenLLMToolSelectorMiddleware,
-            "_process_selection_response",
-            return_value=MagicMock(),
-        ),
-        patch(
-            "EvoScientist.middleware.tool_selector._create_tool_selection_response",
-            return_value=MagicMock(json_schema=MagicMock(return_value={})),
-        ),
-    ):
-        middleware.wrap_model_call(MagicMock(), MagicMock())
-
-    structured_model.invoke.assert_called_once()
-    call_config = structured_model.invoke.call_args.kwargs.get("config")
-    assert call_config is not None
-    assert "langsmith:hidden" in call_config.get("tags", [])
-    # Callback assertion: a future rebase that drops the callbacks entry
-    # would still leave the tags check green, silently killing the
-    # tool_selector.flood observability. Guard against that.
-    from EvoScientist.middleware.tool_selector import _FLOOD_DETECTOR
-
-    assert _FLOOD_DETECTOR in call_config.get("callbacks", [])
-
-
-@pytest.mark.asyncio
-async def test_hidden_selector_tags_ainvoke_with_langsmith_hidden():
-    """Async path also tags with ``langsmith:hidden``."""
-    from langchain_core.language_models import BaseChatModel
-
-    from EvoScientist.middleware.tool_selector import (
-        _HiddenLLMToolSelectorMiddleware,
-    )
-
-    middleware = _HiddenLLMToolSelectorMiddleware(model=MagicMock(spec=BaseChatModel))
-
-    selection_request = MagicMock()
-    selection_request.available_tools = [MagicMock(name="tool_a")]
-    selection_request.valid_tool_names = {"tool_a"}
-    selection_request.system_message = "sys"
-    selection_request.last_user_message = {"role": "user", "content": "hi"}
-
-    structured_model = MagicMock()
-
-    async def _ainvoke(*args, **kwargs):
-        return {"tools": ["tool_a"]}
-
-    structured_model.ainvoke = MagicMock(side_effect=_ainvoke)
-    selection_request.model.with_structured_output.return_value = structured_model
-
-    async def _handler(req):
-        return MagicMock()
-
-    with (
-        patch.object(
-            _HiddenLLMToolSelectorMiddleware,
-            "_prepare_selection_request",
-            return_value=selection_request,
-        ),
-        patch.object(
-            _HiddenLLMToolSelectorMiddleware,
-            "_process_selection_response",
-            return_value=MagicMock(),
-        ),
-        patch(
-            "EvoScientist.middleware.tool_selector._create_tool_selection_response",
-            return_value=MagicMock(json_schema=MagicMock(return_value={})),
-        ),
-    ):
-        await middleware.awrap_model_call(MagicMock(), _handler)
-
-    structured_model.ainvoke.assert_called_once()
-    call_config = structured_model.ainvoke.call_args.kwargs.get("config")
-    assert call_config is not None
-    assert "langsmith:hidden" in call_config.get("tags", [])
-    # Callback assertion: a future rebase that drops the callbacks entry
-    # would still leave the tags check green, silently killing the
-    # tool_selector.flood observability. Guard against that.
-    from EvoScientist.middleware.tool_selector import _FLOOD_DETECTOR
-
-    assert _FLOOD_DETECTOR in call_config.get("callbacks", [])
+    # model_copy applied on the disable_streaming output with the nostream
+    # tag + flood-detector callback APPENDED to whatever the base model
+    # already carried. Tag string is pulled from langgraph's own constants
+    # — the import above is a build-time canary against langgraph renaming
+    # or removing it.
+    streaming_out.model_copy.assert_called_once()
+    update_kwarg = streaming_out.model_copy.call_args.kwargs["update"]
+    assert TAG_NOSTREAM in update_kwarg["tags"]
+    assert _FLOOD_DETECTOR in update_kwarg["callbacks"]
+    # Append (not replace): pre-existing tags/callbacks survive.
+    assert "pre_existing_tag" in update_kwarg["tags"]
+    assert _pre_existing_cb in update_kwarg["callbacks"]
+    # The tagged model is what reaches LLMToolSelectorMiddleware.
+    assert mock_selector.call_args.kwargs["model"] is tagged_out
 
 
 # ---------------------------------------------------------------------------
