@@ -1,8 +1,41 @@
 """Skill management tool (LangChain @tool wrapper)."""
 
+from pathlib import Path
 from typing import Literal
 
 from langchain_core.tools import tool
+
+
+def _build_invoke_str(skill_path: Path) -> str:
+    """Format the ``Invoke:`` block for a skill given its installed directory.
+
+    The ``/skills/`` virtual mount resolves by directory name, so the mount
+    segment is derived from ``skill_path.name`` — never from the SKILL.md
+    ``name:`` field, which can diverge when the same skill is checked out
+    under multiple directory names.
+    """
+    mount = skill_path.name
+    lines = [f"read_file /skills/{mount}/SKILL.md"]
+    if (skill_path / "scripts" / "cli.py").exists():
+        lines.append(
+            f"execute: uv run python /skills/{mount}/scripts/cli.py <subcommand> ..."
+        )
+    return "\nInvoke:\n  " + "\n  ".join(lines)
+
+
+def _format_install_block(entry: dict) -> str:
+    """Format one installed-skill entry from an ``install_skill`` result.
+
+    Handles both single-install returns (``{"name": ..., "path": ...}``) and
+    the per-entry shape inside batch returns (``{"batch": True,
+    "installed": [entry, ...]}``).
+    """
+    invoke_str = _build_invoke_str(Path(entry["path"]))
+    return (
+        f"Successfully installed skill: {entry['name']}\n"
+        f"Description: {entry.get('description', '(none)')}\n"
+        f"{invoke_str.lstrip()}"
+    )
 
 
 @tool(parse_docstring=True)
@@ -67,21 +100,23 @@ def skill_manager(
                 "a GitHub URL, or a local directory path."
             )
         result = install_skill(source)
-        if result["success"]:
-            # Host path (``result['path']``) is intentionally omitted for the
-            # same reason it's omitted from the ``info`` branch below: the
-            # sandboxed agent can't ``cd`` there (workspace cwd differs, ``cd``
-            # doesn't persist across execute calls), and surfacing it invites
-            # the exact ``cd <host-path> && …`` chain the sandbox-path map
-            # exists to prevent. Point at the virtual mount instead.
-            return (
-                f"Successfully installed skill: {result['name']}\n"
-                f"Description: {result.get('description', '(none)')}\n\n"
-                f"Invoke:\n"
-                f"  read_file /skills/{result['name']}/SKILL.md"
-            )
-        else:
+        if not result["success"]:
             return f"Failed to install skill: {result['error']}"
+        # Host paths are intentionally omitted for the same reason they're
+        # omitted from the ``info`` branch below: the sandboxed agent can't
+        # ``cd`` there (workspace cwd differs, ``cd`` doesn't persist across
+        # execute calls), and surfacing them invites the exact
+        # ``cd <host-path> && …`` chain the sandbox-path map exists to
+        # prevent. Point at the virtual mount instead. Batch installs (a
+        # source directory containing several SKILL.md subdirs) return
+        # ``{"batch": True, "installed": [...]}`` without a top-level
+        # ``name`` — handle that shape explicitly so the response doesn't
+        # KeyError.
+        entries = result["installed"] if result.get("batch") else [result]
+        blocks = []
+        for entry in entries:
+            blocks.append(_format_install_block(entry))
+        return "\n\n".join(blocks)
 
     elif action == "list":
         skills = list_skills(include_system=include_system)
@@ -160,13 +195,7 @@ def skill_manager(
         # cwd is a different directory, and `cd` doesn't persist across execute
         # calls anyway). The `Invoke:` block below gives the only forms that
         # actually work.
-        invoke_lines = [f"read_file /skills/{info.name}/SKILL.md"]
-        cli_script = info.path / "scripts" / "cli.py"
-        if cli_script.exists():
-            invoke_lines.append(
-                f"execute: uv run python /skills/{info.name}/scripts/cli.py <subcommand> ..."
-            )
-        invoke_str = "\nInvoke:\n  " + "\n  ".join(invoke_lines)
+        invoke_str = _build_invoke_str(info.path)
         return (
             f"Name: {info.name}\n"
             f"Description: {info.description}\n"

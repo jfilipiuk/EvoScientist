@@ -1058,3 +1058,80 @@ class TestSkillManagerInfo:
         # (``Local:``, ``Installed at:``, embedded in ``Source: …``).
         assert "\nPath:" not in result
         assert str(info.path) not in result
+
+
+class TestSkillManagerInstall:
+    """Tests for the ``install`` action's output shape.
+
+    Two shapes must be handled: single install (``{"name": ..., "path": ...}``)
+    and batch install (``{"batch": True, "installed": [entry, ...]}`` with no
+    top-level ``name``). The tool previously indexed ``result['name']``
+    unconditionally, which KeyError'd on the batch return.
+    """
+
+    def _make_skill_with_cli(self, parent, name):
+        d = parent / name
+        d.mkdir()
+        (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: A skill\n---\n")
+        (d / "scripts").mkdir()
+        (d / "scripts" / "cli.py").write_text("# stub\n")
+        return d
+
+    def _make_skill_prompt_only(self, parent, name):
+        d = parent / name
+        d.mkdir()
+        (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: A skill\n---\n")
+        return d
+
+    def test_install_single_surfaces_invoke_block(self, tmp_path):
+        """Single install: response includes the ``Invoke:`` shapes so the
+        agent doesn't have to follow up with ``info`` for the CLI path.
+        """
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        self._make_skill_with_cli(tmp_path, "solo")
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", tmp_path / "global-empty"),
+        ):
+            (tmp_path / "global-empty").mkdir()
+            result = skill_manager.invoke(
+                {"action": "install", "source": str(tmp_path / "solo")}
+            )
+
+        assert "Successfully installed skill: solo" in result
+        assert "read_file /skills/solo/SKILL.md" in result
+        assert (
+            "execute: uv run python /skills/solo/scripts/cli.py <subcommand>" in result
+        )
+
+    def test_install_batch_lists_each_installed_skill(self, tmp_path):
+        """Batch install (source dir with N sub-skills, no root SKILL.md):
+        response emits one block per installed skill and does NOT KeyError
+        on the missing top-level ``name`` field.
+        """
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        pack = tmp_path / "pack"
+        pack.mkdir()
+        self._make_skill_with_cli(pack, "alpha")
+        self._make_skill_prompt_only(pack, "beta")
+
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", tmp_path / "global-empty"),
+        ):
+            (tmp_path / "global-empty").mkdir()
+            result = skill_manager.invoke({"action": "install", "source": str(pack)})
+
+        assert "Successfully installed skill: alpha" in result
+        assert "Successfully installed skill: beta" in result
+        # cli-shipping skill gets the execute line; prompt-only skill does not.
+        assert "/skills/alpha/scripts/cli.py" in result
+        assert "/skills/beta/scripts/cli.py" not in result
+        assert "read_file /skills/beta/SKILL.md" in result

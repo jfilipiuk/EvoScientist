@@ -293,11 +293,17 @@ def _inject_subagent_middleware(
     cfg=None,
     chat_model=None,
 ) -> None:
-    """Ensure every subagent gets error handling and context management middleware.
+    """Wire subagent middleware and, in sandbox mode, prepend the sandbox path-map.
 
-    Without this, subagent tool errors are caught by LangGraph's default
-    ToolNode handler which produces terse messages without tracebacks or
-    retry guidance — reducing the subagent's ability to self-recover.
+    Middleware: subagent tool errors would otherwise be caught by LangGraph's
+    default ToolNode handler with terse messages and no tracebacks, reducing
+    the subagent's ability to self-recover.
+
+    Prompt: sub-agents mount ``/skills/`` and may hold ``skill_manager``;
+    without ``SANDBOX_PATH_MAP`` prepended they hit the same repo-layout /
+    ``cd``-chain failure mode the main agent's prompt closes. Dangerous
+    mode operates on the real filesystem — no virtual mounts, so the
+    section would mislead there.
 
     *chat_model*, when provided, is forwarded to the subagents'
     ``create_context_editing_middleware`` so the pure ``create_cli_agent``
@@ -313,11 +319,13 @@ def _inject_subagent_middleware(
         create_runtime_context_middleware,
         default_memory_scheduler,
     )
+    from .prompts import SANDBOX_PATH_MAP
 
     cfg = cfg if cfg is not None else _ensure_config()
     memory_controls = MemoryControls.from_config(cfg)
     memory_dir = str(_paths_mod.MEMORIES_DIR)
     memory_scheduler = default_memory_scheduler()
+    prepend_sandbox_map = not cfg.dangerous_mode
     for sa in subs:
         name = str(sa.get("name") or "sub-agent")
         source_type = MemorySourceType.SUBAGENT
@@ -361,6 +369,9 @@ def _inject_subagent_middleware(
                 )
             )
         sa.setdefault("middleware", []).extend(middleware)
+        if prepend_sandbox_map:
+            existing_prompt = sa.get("system_prompt", "")
+            sa["system_prompt"] = (SANDBOX_PATH_MAP + "\n\n" + existing_prompt).strip()
 
 
 def _ensure_general_purpose_subagent(subs: list[dict]) -> None:
@@ -489,7 +500,13 @@ def _build_base_kwargs(
     from .utils import load_subagents
 
     cfg = cfg if cfg is not None else _ensure_config()
-    tool_registry = {"think_tool": think_tool}
+    # Match the registry constructed in `subagents/_factory.py:59` so that
+    # subagents declaring `tools: [skill_manager, ...]` in their YAML get
+    # the tool wired instead of silently dropped. Previously only
+    # `think_tool` was here; `scheduler.yaml` asks for `skill_manager`
+    # and lost the tool with just a "not in registry, skipping" warning —
+    # surfacing only at runtime when the missing tool was called.
+    tool_registry = {"think_tool": think_tool, "skill_manager": skill_manager}
     if os.environ.get("TAVILY_API_KEY"):
         tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
@@ -551,7 +568,10 @@ def load_mcp_and_build_kwargs(
             workspace_dir=workspace_dir,
         )
 
-    tool_registry = {"think_tool": think_tool}
+    # See `_build_base_kwargs` above for the skill_manager rationale — the
+    # MCP path needs the same registry so subagents like `scheduler` get
+    # their declared `skill_manager` tool wired.
+    tool_registry = {"think_tool": think_tool, "skill_manager": skill_manager}
     if os.environ.get("TAVILY_API_KEY"):
         tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]

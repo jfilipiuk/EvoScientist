@@ -51,19 +51,19 @@ SANDBOX_PATH_MAP = """# Sandbox Paths
 
 Three path shapes work inside the `execute` shell AND the filesystem tools (`read_file`, `ls`, `glob`) — the shell subprocess sees the same virtual mounts your filesystem tools see, so paths are interchangeable between them:
 
-- `/skills/<name>/...` — read-only mount of installed skills. Invoke a skill's CLI from `execute` with `uv run python /skills/<name>/scripts/cli.py <subcommand> ...`. Read a skill's runbook with `read_file /skills/<name>/SKILL.md`.
+- `/skills/<name>/...` — read-only mount of installed skills. Read a skill's runbook with `read_file /skills/<name>/SKILL.md`.
 - `/memories/...` — persistent per-workspace memory (graphs, elaborations, saved observations). Same path in both surfaces.
 - `./` (or `.`) — the workspace root: writable, ephemeral per-conversation intermediates.
 
-The **only** correct form for invoking a skill's CLI is:
+Every path segment referring to a skill's contents must begin with the absolute virtual mount `/skills/<name>/`. Repo-layout prefixes (`EvoScientist/skills/...`, `./skills/...`) and host prefixes (`/home/.../EvoScientist/...`) do not resolve.
 
-```
-uv run python /skills/<name>/scripts/cli.py <subcommand> ...
-```
+Invoking a skill from `execute`:
 
-Any other form is prohibited and will fail. This includes repo-layout paths (`EvoScientist/skills/...`, `./skills/...`), absolute host paths (`/home/.../EvoScientist/...`), and any `cd` prefix. If you see a different shape anywhere — including inside a SKILL.md's bash examples — treat it as wrong and use the form above.
+- When the skill ships `scripts/cli.py`, the **only** correct form is `uv run python /skills/<name>/scripts/cli.py <subcommand> ...`.
+- When the skill has no `scripts/cli.py`, follow the commands documented in that skill's `SKILL.md`, keeping every skill-relative path anchored at `/skills/<name>/`.
+- Use `skill_manager(action="info", name="<name>")` when you need to confirm which form applies — it reports the invocation shape directly.
 
-Do **not** run `pwd`, `find`, `glob`, or `ls -R` to discover where a skill's scripts live. The path is stable — searching wastes turns and returns nothing useful. If you need to confirm a skill exists, use `skill_manager(action="info", name="<name>")`.
+Do **not** run `pwd`, `find`, `glob`, or `ls -R` to discover where a skill's scripts live. The path is stable — searching wastes turns and returns nothing useful. If you need to confirm a skill exists or check its invocation shape, use `skill_manager(action="info", name="<name>")`.
 
 Do **not** chain commands with `cd <path> && …`. Two facts make `cd` a trap:
 

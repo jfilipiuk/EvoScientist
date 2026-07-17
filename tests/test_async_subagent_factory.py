@@ -315,6 +315,72 @@ def test_async_subagent_disables_tool_selector_stream_tracking(
     assert mock_tool_selector.call_args.kwargs["track_stream_selection"] is False
 
 
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.EvoScientist._ensure_config")
+def test_inject_subagent_prepends_sandbox_path_map_in_sandbox_mode(
+    mock_config, mock_model, tmp_path
+):
+    """Sync sub-agents (main-agent path) must also receive ``SANDBOX_PATH_MAP``.
+
+    Async sub-agents are covered by the ``build_async_subagent_graph`` test
+    below; this pins the equivalent contract on the shared
+    ``_inject_subagent_middleware`` code path used by ``_build_base_kwargs``
+    / ``load_mcp_and_build_kwargs``.
+    """
+    mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+    cfg = MagicMock()
+    cfg.memory_profile_enabled = True
+    cfg.memory_observations_enabled = True
+    cfg.memory_observation_writer = MemoryObservationWriter.ALL
+    cfg.memory_workers_enabled = True
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
+    cfg.dangerous_mode = False
+    mock_config.return_value = cfg
+
+    from EvoScientist.EvoScientist import _inject_subagent_middleware
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subs = [{"name": "planner-agent", "system_prompt": "You plan experiments."}]
+
+    _inject_subagent_middleware(subs, workspace_dir=workspace)
+
+    prompt = subs[0]["system_prompt"]
+    assert "# Sandbox Paths" in prompt
+    assert "/skills/<name>/" in prompt
+    assert "You plan experiments." in prompt
+    assert prompt.find("# Sandbox Paths") < prompt.find("You plan experiments.")
+
+
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.EvoScientist._ensure_config")
+def test_inject_subagent_omits_sandbox_path_map_in_dangerous_mode(
+    mock_config, mock_model, tmp_path
+):
+    """Dangerous-mode sub-agents skip ``SANDBOX_PATH_MAP`` — no virtual mounts."""
+    mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+    cfg = MagicMock()
+    cfg.memory_profile_enabled = True
+    cfg.memory_observations_enabled = True
+    cfg.memory_observation_writer = MemoryObservationWriter.ALL
+    cfg.memory_workers_enabled = True
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
+    cfg.dangerous_mode = True
+    mock_config.return_value = cfg
+
+    from EvoScientist.EvoScientist import _inject_subagent_middleware
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subs = [{"name": "planner-agent", "system_prompt": "You plan experiments."}]
+
+    _inject_subagent_middleware(subs, workspace_dir=workspace)
+
+    assert subs[0]["system_prompt"] == "You plan experiments."
+
+
 @patch("deepagents.create_deep_agent")
 @patch("EvoScientist.EvoScientist._load_mcp_tools_cached", return_value={})
 @patch("EvoScientist.EvoScientist._get_default_middleware", return_value=[])
