@@ -503,6 +503,15 @@ def _build_base_kwargs(
         SUBAGENTS_CONFIG,
         tool_registry=tool_registry,
     )
+    # Fold in expert-skill sub-agents (agent-teams v1). Each installed expert
+    # skill becomes an in-process sub-agent entry so the main agent's `task`
+    # tool (and the QuickJS `task()` global for panel mode) can dispatch to
+    # it by name. Async-graph deploy of experts is v2 territory — for now
+    # they live purely in the sync in-process registry. See
+    # notes/teams-and-workflows/agent-teams-design.md.
+    from .subagents.expert_container import build_expert_subagent_specs
+
+    subs.extend(build_expert_subagent_specs(tool_registry=tool_registry))
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
         subs, workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
@@ -573,6 +582,12 @@ def load_mcp_and_build_kwargs(
         SUBAGENTS_CONFIG,
         tool_registry=registry,
     )
+    # Fold in expert-skill sub-agents (agent-teams v1). See the same block
+    # in `_build_base_kwargs` above for rationale — this MCP path mirrors it
+    # so both construction routes surface installed experts identically.
+    from .subagents.expert_container import build_expert_subagent_specs
+
+    subs.extend(build_expert_subagent_specs(tool_registry=registry))
 
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
