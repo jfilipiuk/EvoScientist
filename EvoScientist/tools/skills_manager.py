@@ -57,6 +57,16 @@ class SkillInfo:
     path: Path
     source: str  # "workspace", "global", or "builtin"
     tags: list[str] = field(default_factory=list)
+    # Expert-skill fields for the v1 agent-teams feature. All default
+    # to utility-skill values so existing skills stay unchanged and their
+    # SKILL.md files need no edits. See:
+    # notes/teams-and-workflows/agent-teams-design.md
+    type: str = "utility"  # "utility" (default) or "expert"
+    role: str = ""  # one-line role summary shown to the orchestrator LLM
+    byline: str = ""  # WebUI gallery byline
+    capability_tags: list[str] = field(default_factory=list)  # WebUI chips
+    avatar_hint: str = ""  # WebUI icon hint
+    default_dispatch: str = ""  # "sync" | "panel" (expert skills only)
 
 
 def _normalize_tags(raw: object) -> list[str]:
@@ -206,7 +216,9 @@ def installed_provenance() -> dict[str, dict[str, str | None]]:
 
 
 def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
-    """Parse SKILL.md frontmatter to extract name, description, and tags.
+    """Parse SKILL.md frontmatter to extract name, description, tags, and
+    (for expert skills) role / byline / capability_tags / avatar_hint /
+    default_dispatch.
 
     SKILL.md format:
         ---
@@ -215,6 +227,14 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         tags: [tag1, tag2]
         metadata:
           tags: [tag1, tag2]   # fallback location
+        # Expert-skill fields (all optional; only meaningful when
+        # ``type: expert`` — see agent-teams-design.md):
+        type: expert
+        role: One-line role summary
+        byline: Short persona name for gallery
+        capability_tags: [Tag One, Tag Two]
+        avatar_hint: lightbulb
+        default_dispatch: sync
         ---
         # Skill Title
         ...
@@ -229,13 +249,30 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
     parent = skill_md_path.parent
     content = skill_md_path.read_text(encoding="utf-8")
 
-    def _info(name: str, description: str, tags: list[str] | None = None) -> SkillInfo:
+    def _info(
+        name: str,
+        description: str,
+        tags: list[str] | None = None,
+        *,
+        type_: str = "utility",
+        role: str = "",
+        byline: str = "",
+        capability_tags: list[str] | None = None,
+        avatar_hint: str = "",
+        default_dispatch: str = "",
+    ) -> SkillInfo:
         return SkillInfo(
             name=name,
             description=description,
             path=parent,
             source=source,
             tags=tags or [],
+            type=type_,
+            role=role,
+            byline=byline,
+            capability_tags=capability_tags or [],
+            avatar_hint=avatar_hint,
+            default_dispatch=default_dispatch,
         )
 
     # Extract YAML frontmatter
@@ -254,10 +291,29 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             metadata = frontmatter.get("metadata")
             if isinstance(metadata, dict):
                 tags = _normalize_tags(metadata.get("tags"))
+        # Expert-skill fields. Only trusted when explicit; unknown
+        # ``type`` values silently fall back to "utility" so a typo
+        # doesn't accidentally register a skill as an expert.
+        raw_type = frontmatter.get("type")
+        type_ = raw_type if raw_type in ("expert", "utility") else "utility"
+        role = frontmatter.get("role") or ""
+        byline = frontmatter.get("byline") or ""
+        capability_tags = _normalize_tags(frontmatter.get("capability_tags"))
+        avatar_hint = frontmatter.get("avatar_hint") or ""
+        raw_dispatch = frontmatter.get("default_dispatch")
+        default_dispatch = raw_dispatch if raw_dispatch in ("sync", "panel") else ""
         return _info(
             frontmatter.get("name", parent.name),
             frontmatter.get("description", "(no description)"),
             tags,
+            type_=type_,
+            role=str(role) if not isinstance(role, str) else role,
+            byline=str(byline) if not isinstance(byline, str) else byline,
+            capability_tags=capability_tags,
+            avatar_hint=str(avatar_hint)
+            if not isinstance(avatar_hint, str)
+            else avatar_hint,
+            default_dispatch=default_dispatch,
         )
     except yaml.YAMLError:
         return _info(parent.name, "(invalid frontmatter)")
@@ -761,6 +817,28 @@ def list_skills(include_system: bool = False) -> list[SkillInfo]:
         _add_tier(Path(SKILLS_DIR), source="builtin")
 
     return skills
+
+
+def list_expert_skills(include_system: bool = True) -> list[SkillInfo]:
+    """List installed expert skills (agent-teams v1).
+
+    Filters ``list_skills()`` output to entries whose SKILL.md frontmatter
+    declares ``type: expert``. Defaults ``include_system=True`` because
+    first-party experts (`idea-brainstorm`, etc.) ship under the builtin
+    skills tier; user-installed experts still surface from the workspace
+    and global tiers alongside them.
+
+    Consumed by:
+      - ``GET /api/teams`` (WebUI gallery listing).
+      - Main-agent construction (folds expert skills into the
+        ``subagents=[...]`` list so the ``task`` tool can dispatch to
+        them for sync consult).
+      - The ``skill_manager`` @tool's ``type=expert`` filter.
+
+    Returns:
+        List of ``SkillInfo`` for each expert skill.
+    """
+    return [s for s in list_skills(include_system=include_system) if s.type == "expert"]
 
 
 def uninstall_skill(name: str) -> dict:
