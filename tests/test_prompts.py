@@ -114,6 +114,19 @@ class TestGetSystemPrompt:
             0 <= result.find("# Sandbox Paths") < result.find("# Experiment Workflow")
         )
 
+    def test_sandbox_path_map_teaches_module_invocation_translation(self):
+        """The `-m <module>.<X>` translation rule must appear in the map.
+
+        When SKILL.md documents ``python -m scripts.<X>`` (e.g. skill-creator),
+        the sandbox-equivalent needs ``uv run --directory /skills/<name>``
+        because ``-m`` relies on cwd at the skill root and the ``cd``-into-
+        absolute-path form is blocked at the shell layer. Without this rule,
+        agents translate the SKILL.md form ad-hoc and hit the ``cd`` filter.
+        """
+        result = get_system_prompt(dangerous=False)
+        assert "python -m" in result
+        assert "uv run --directory /skills/<name>" in result
+
     def test_sandbox_path_map_omitted_in_dangerous_mode(self):
         """Dangerous mode operates on the real filesystem — no virtual mounts,
         so the sandbox-path section would be misleading.

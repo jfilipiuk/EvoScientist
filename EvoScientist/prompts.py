@@ -57,11 +57,14 @@ Three path shapes work inside the `execute` shell AND the filesystem tools (`rea
 
 Every path segment referring to a skill's contents must begin with the absolute virtual mount `/skills/<name>/`. Repo-layout prefixes (`EvoScientist/skills/...`, `./skills/...`) and host prefixes (`/home/.../EvoScientist/...`) do not resolve.
 
-Invoking a skill from `execute`:
+Invoking a skill from `execute` — translate every skill-relative reference documented in `SKILL.md` into the sandbox `/skills/<name>/` mount:
 
-- When the skill ships `scripts/cli.py`, the **only** correct form is `uv run python /skills/<name>/scripts/cli.py <subcommand> ...`.
-- When the skill has no `scripts/cli.py`, follow the commands documented in that skill's `SKILL.md`, keeping every skill-relative path anchored at `/skills/<name>/`.
-- Use `skill_manager(action="info", name="<name>")` when you need to confirm which form applies — it reports the invocation shape directly.
+- Any path — CLI entry point, utility script, resource file — becomes an absolute `/skills/<name>/...` path. For example: `uv run python /skills/<name>/scripts/cli.py <subcommand> ...` or `uv run python /skills/<name>/scripts/<X>.py ...`.
+- Any `python -m <module>.<X>` invocation (needs cwd at the skill root) becomes `uv run --directory /skills/<name> python -m <module>.<X> ...`.
+
+A single skill can use both shapes — a CLI subcommand for its main flow and `-m scripts.validate` for a utility script. Match the `SKILL.md`'s documented form for each command.
+
+Use `skill_manager(action="info", name="<name>")` when you need to check what a skill documents.
 
 Do **not** run `pwd`, `find`, `glob`, or `ls -R` to discover where a skill's scripts live. The path is stable — searching wastes turns and returns nothing useful. If you need to confirm a skill exists or check its invocation shape, use `skill_manager(action="info", name="<name>")`.
 
