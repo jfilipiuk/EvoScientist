@@ -372,7 +372,7 @@ def _inject_subagent_middleware(
             )
         sa.setdefault("middleware", []).extend(middleware)
         if prepend_sandbox_map:
-            existing_prompt = sa.get("system_prompt", "")
+            existing_prompt = sa.get("system_prompt") or ""
             sa["system_prompt"] = (SANDBOX_PATH_MAP + "\n\n" + existing_prompt).strip()
 
 
