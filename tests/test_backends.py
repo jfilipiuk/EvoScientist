@@ -110,6 +110,23 @@ class TestValidateCommand:
         result = validate_command("cd /etc && cat passwd")
         assert result is not None
 
+    def test_blocked_cd_into_skills_mount(self):
+        """`cd /skills/<name> && …` is blocked by the `\\bcd\\s+/` filter.
+
+        Reviewer follow-up on PR#352: some SKILL.md files document
+        `python -m scripts.X` which needs cwd at the skill root. Agents
+        instinctively reach for `cd /skills/<name> && python -m scripts.X`
+        to satisfy that — the filter blocks it. Any invocation that requires
+        the skill root as cwd has to go via `uv run --directory /skills/<name>`
+        instead (see :class:`TestValidateCommandSkillsMountAllowedForms`).
+        """
+        result = validate_command(
+            "cd /skills/skill-creator && uv run python -m scripts.quick_validate --help",
+            allow_prefixes=("/skills/", "/memories/"),
+        )
+        assert result is not None
+        assert "cd" in result
+
     def test_safe_echo(self):
         assert validate_command("echo hello world") is None
 
@@ -120,6 +137,43 @@ class TestValidateCommand:
         result = validate_command("ssh host 'ls /home/username/project'")
         assert result is not None
         assert "/home/username/project" in result
+
+
+class TestValidateCommandSkillsMountAllowedForms:
+    """The `/skills/` virtual mount is the sanctioned way to reach skills.
+
+    These tests pin the filter's contract for skill invocation shapes so
+    a future path-guard refactor can't silently block the two forms agents
+    actually rely on:
+
+    - File-path invocation: ``uv run python /skills/<name>/scripts/X.py …``
+      (what our prompt documents; works for every skill layout).
+    - `--directory` invocation: ``uv run --directory /skills/<name> python -m
+      scripts.X …`` (needed by skills that ship a proper ``scripts`` package
+      and document ``python -m scripts.X`` — verified against the actual
+      ``skill-creator`` skill in ``test_skill_invocation_forms.py``).
+
+    Whether ``-m scripts.X`` succeeds at runtime is skill-layout-dependent
+    (see the integration tests); that's out of scope for the shell filter.
+    """
+
+    def test_file_path_invocation_allowed(self):
+        assert (
+            validate_command(
+                "uv run python /skills/skill-creator/scripts/quick_validate.py --help",
+                allow_prefixes=("/skills/", "/memories/"),
+            )
+            is None
+        )
+
+    def test_uv_directory_invocation_allowed(self):
+        assert (
+            validate_command(
+                "uv run --directory /skills/skill-creator python -m scripts.quick_validate --help",
+                allow_prefixes=("/skills/", "/memories/"),
+            )
+            is None
+        )
 
 
 class TestValidateCommandDangerous:
