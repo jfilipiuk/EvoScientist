@@ -507,8 +507,7 @@ def _build_base_kwargs(
     # skill becomes an in-process sub-agent entry so the main agent's `task`
     # tool (and the QuickJS `task()` global for panel mode) can dispatch to
     # it by name. Async-graph deploy of experts is v2 territory — for now
-    # they live purely in the sync in-process registry. See
-    # notes/teams-and-workflows/agent-teams-design.md.
+    # they live purely in the sync in-process registry.
     from .subagents.expert_container import build_expert_subagent_specs
 
     subs.extend(build_expert_subagent_specs(tool_registry=tool_registry))

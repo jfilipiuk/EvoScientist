@@ -28,8 +28,6 @@ Not included in the async-subagent middleware stack: an expert running
 as its own graph would otherwise inject a "prefer expert X" cue into
 its own system prompt, where the persona is already baked in. See
 ``EvoScientist.py::_get_default_middleware``.
-
-See ``notes/teams-and-workflows/agent-teams-design.md``.
 """
 
 from __future__ import annotations

@@ -11,25 +11,17 @@ The generic-container principle from #361 lives in THIS FUNCTION — one
 construction path for all experts, sourcing behaviour from the skill file
 rather than a per-expert YAML. There's no deployed graph per expert in v1;
 that's async-thread territory (v2) and blocked on the deepagents
-`AsyncSubAgent` config-passthrough gap. See:
-
-    notes/teams-and-workflows/agent-teams-design.md
+`AsyncSubAgent` config-passthrough gap.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
-from ..tools.skills_manager import SkillInfo
+from ..tools.skills_manager import SkillInfo, _split_frontmatter_and_body
 
 _logger = logging.getLogger(__name__)
-
-# Match the same YAML frontmatter block that `_parse_skill_md` recognises so
-# `_body_of` and the SkillInfo parser stay in sync. If the frontmatter regex
-# there evolves, update here too.
-_FRONTMATTER_RE = re.compile(r"^---\s*\n.*?\n---\s*\n?", re.DOTALL)
 
 # Default toolset for expert subagents. Kept minimal — most experts are
 # "reason about the incoming description and produce structured output";
@@ -51,12 +43,13 @@ _DEFAULT_EXPERT_SKILLS: tuple[str, ...] = ("/skills/",)
 def _body_of(skill_info: SkillInfo) -> str:
     """Return the SKILL.md body (post-frontmatter content).
 
-    Reads the file fresh — SkillInfo doesn't cache the body. Returns an empty
-    string if the file can't be read; the caller is responsible for deciding
-    whether an empty prompt is acceptable (the current factory logs a warning
-    and passes it through so the malformed skill surfaces at dispatch time
-    rather than at agent build).
+    Prefers the body cached on ``SkillInfo`` by ``_parse_skill_md``. Falls
+    back to reading SKILL.md fresh if the cached body is empty — that
+    handles skills constructed by hand (external callers) without a body
+    field populated. Returns an empty string if the file can't be read.
     """
+    if skill_info.body:
+        return skill_info.body
     skill_md = skill_info.path / "SKILL.md"
     try:
         content = skill_md.read_text(encoding="utf-8")
@@ -68,7 +61,8 @@ def _body_of(skill_info: SkillInfo) -> str:
             exc,
         )
         return ""
-    return _FRONTMATTER_RE.sub("", content, count=1).lstrip()
+    _, body = _split_frontmatter_and_body(content)
+    return body
 
 
 def _compose_system_prompt(skill_info: SkillInfo, body: str) -> str:

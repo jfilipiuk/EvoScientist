@@ -98,8 +98,8 @@ async def get_teams(_request: Request) -> JSONResponse:
     filesystem walking + yaml parsing, which langgraph-dev's
     ``blockbuster`` middleware refuses on the async event loop.
 
-    See ``notes/teams-and-workflows/agent-teams-design.md`` for the
-    contract this endpoint fulfills.
+    Response shape (each entry): ``{name, description, byline?,
+    capability_tags?, avatar_hint?}`` — the WebUI gallery consumes these.
     """
     from EvoScientist.tools.skills_manager import list_expert_skills
 

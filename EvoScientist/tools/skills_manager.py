@@ -59,14 +59,45 @@ class SkillInfo:
     tags: list[str] = field(default_factory=list)
     # Expert-skill fields for the v1 agent-teams feature. All default
     # to utility-skill values so existing skills stay unchanged and their
-    # SKILL.md files need no edits. See:
-    # notes/teams-and-workflows/agent-teams-design.md
+    # SKILL.md files need no edits.
     type: str = "utility"  # "utility" (default) or "expert"
     role: str = ""  # one-line role summary shown to the orchestrator LLM
     byline: str = ""  # WebUI gallery byline
     capability_tags: list[str] = field(default_factory=list)  # WebUI chips
     avatar_hint: str = ""  # WebUI icon hint
     default_dispatch: str = ""  # "sync" | "panel" (expert skills only)
+    # SKILL.md body (post-frontmatter). Populated by ``_parse_skill_md`` so
+    # the expert-container factory doesn't have to re-read the file on every
+    # main-agent construction. Empty for skills built by hand or when the
+    # source SKILL.md has no body content.
+    body: str = ""
+
+
+# Shared frontmatter split regex. Captures three parts:
+#   1. leading fence (``^---\s*\n``)
+#   2. frontmatter YAML (``.*?``)
+#   3. trailing fence + optional newline (``\n---\s*\n?``)
+# Used by both ``_parse_skill_md`` (needs the YAML) and the expert-container
+# factory (needs the body); a single source of truth for "what is the
+# frontmatter block" so schema extensions don't drift across call sites.
+_FRONTMATTER_SPLIT_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+
+
+def _split_frontmatter_and_body(content: str) -> tuple[str, str]:
+    """Return ``(frontmatter_yaml, body)`` for a SKILL.md text.
+
+    ``frontmatter_yaml`` is the raw YAML block between the ``---`` fences
+    (still a string, not parsed). ``body`` is the post-fence content with
+    leading whitespace stripped. When there is no valid frontmatter block,
+    ``frontmatter_yaml`` is ``""`` and the whole content becomes the body —
+    matches the legacy expert-container behaviour of passing plain-body
+    files through unchanged.
+    """
+    match = _FRONTMATTER_SPLIT_RE.match(content)
+    if not match:
+        return "", content.lstrip()
+    body = content[match.end() :].lstrip()
+    return match.group(1), body
 
 
 def _normalize_tags(raw: object) -> list[str]:
@@ -260,6 +291,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         capability_tags: list[str] | None = None,
         avatar_hint: str = "",
         default_dispatch: str = "",
+        body: str = "",
     ) -> SkillInfo:
         return SkillInfo(
             name=name,
@@ -273,18 +305,19 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             capability_tags=capability_tags or [],
             avatar_hint=avatar_hint,
             default_dispatch=default_dispatch,
+            body=body,
         )
 
-    # Extract YAML frontmatter
-    frontmatter_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
-    if not frontmatter_match:
-        # No frontmatter, use directory name
-        return _info(parent.name, "(no description)")
+    frontmatter_yaml, body = _split_frontmatter_and_body(content)
+    if not frontmatter_yaml:
+        # No frontmatter, use directory name; still cache the body so
+        # the expert-container factory doesn't have to re-read.
+        return _info(parent.name, "(no description)", body=body)
 
     try:
-        frontmatter = yaml.safe_load(frontmatter_match.group(1))
+        frontmatter = yaml.safe_load(frontmatter_yaml)
         if not isinstance(frontmatter, dict):
-            return _info(parent.name, "(empty frontmatter)")
+            return _info(parent.name, "(empty frontmatter)", body=body)
         # Tags: check top-level first, fall back to metadata.tags
         tags = _normalize_tags(frontmatter.get("tags"))
         if not tags:
@@ -314,9 +347,10 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             if not isinstance(avatar_hint, str)
             else avatar_hint,
             default_dispatch=default_dispatch,
+            body=body,
         )
     except yaml.YAMLError:
-        return _info(parent.name, "(invalid frontmatter)")
+        return _info(parent.name, "(invalid frontmatter)", body=body)
 
 
 def _parse_github_url(url: str) -> tuple[str, str | None, str | None]:
