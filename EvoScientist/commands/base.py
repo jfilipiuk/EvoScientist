@@ -65,10 +65,16 @@ class CommandUI(Protocol):
 
 @dataclass
 class ChannelRuntime:
-    """Mutable handle to the agent + thread bound to running channels."""
+    """Mutable handle to the agent + thread bound to running channels.
+
+    Also holds session-scoped bindings mutated by slash commands — the
+    ``active_teams`` list backs the ``/expert`` command, feeding into
+    ``RunRequest.configurable_extra`` at stream call time.
+    """
 
     agent: Any = None
     thread_id: str | None = None
+    active_teams: list[str] = field(default_factory=list)
 
     def bind(self, agent: Any, thread_id: str) -> None:
         self.agent = agent
@@ -77,6 +83,7 @@ class ChannelRuntime:
     def clear(self) -> None:
         self.agent = None
         self.thread_id = None
+        self.active_teams = []
 
 
 @dataclass
