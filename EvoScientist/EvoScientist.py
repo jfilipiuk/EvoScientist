@@ -778,7 +778,7 @@ def _get_default_middleware(
         ConfigurableModelMiddleware(),
         # Team-binding cue for the main agent only. Reads
         # `configurable.active_teams: list[str]` and appends a cue biasing
-        # the main agent to consult the summoned expert(s). Skipped for
+        # the main agent to consult the invited expert(s). Skipped for
         # async subagents (a running expert graph shouldn't inject a
         # "prefer expert X" hint into its own system prompt — the persona
         # is already baked in). See agent-teams-design.md.

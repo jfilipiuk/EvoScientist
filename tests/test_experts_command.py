@@ -70,9 +70,9 @@ class TestExpertsList:
             ],
         ):
             await ExpertsCommand().execute(ctx, args=[])
-        # A Rich Table was mounted, and the no-experts-summoned hint appeared.
+        # A Rich Table was mounted, and the no-experts-invited hint appeared.
         assert len(ui.mounted) == 1
-        assert any("No experts summoned" in text for text, _ in ui.lines)
+        assert any("No experts invited" in text for text, _ in ui.lines)
 
     async def test_empty_list_prints_help_hint(self):
         ctx, ui = _make_ctx()
@@ -118,7 +118,7 @@ class TestExpertToggle:
         )
         assert ctx.channel_runtime.active_teams == []
 
-    async def test_summon_adds_to_active_teams(self):
+    async def test_invite_adds_to_active_teams(self):
         ctx, ui = _make_ctx()
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
@@ -126,9 +126,9 @@ class TestExpertToggle:
         ):
             await ExpertCommand().execute(ctx, args=["idea-brainstorm"])
         assert ctx.channel_runtime.active_teams == ["idea-brainstorm"]
-        assert any("Summoned expert: idea-brainstorm" in text for text, _ in ui.lines)
+        assert any("Invited expert: idea-brainstorm" in text for text, _ in ui.lines)
 
-    async def test_toggle_releases_when_already_summoned(self):
+    async def test_toggle_dismisses_when_already_invited(self):
         ctx, ui = _make_ctx(active_teams=["idea-brainstorm"])
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
@@ -136,21 +136,21 @@ class TestExpertToggle:
         ):
             await ExpertCommand().execute(ctx, args=["idea-brainstorm"])
         assert ctx.channel_runtime.active_teams == []
-        assert any("Released expert: idea-brainstorm" in text for text, _ in ui.lines)
+        assert any("Dismissed expert: idea-brainstorm" in text for text, _ in ui.lines)
 
-    async def test_clear_releases_all(self):
+    async def test_clear_dismisses_all(self):
         ctx, ui = _make_ctx(active_teams=["idea-brainstorm", "second"])
         await ExpertCommand().execute(ctx, args=["clear"])
         assert ctx.channel_runtime.active_teams == []
         assert any(
-            "Released experts: idea-brainstorm, second" in text for text, _ in ui.lines
+            "Dismissed experts: idea-brainstorm, second" in text for text, _ in ui.lines
         )
 
     async def test_clear_on_empty_list_reports_nothing_to_do(self):
         ctx, ui = _make_ctx()
         await ExpertCommand().execute(ctx, args=["clear"])
         assert ctx.channel_runtime.active_teams == []
-        assert any("No experts summoned" in text for text, _ in ui.lines)
+        assert any("No experts invited" in text for text, _ in ui.lines)
 
     async def test_no_channel_runtime_prints_warning(self):
         ui = _FakeUI()
