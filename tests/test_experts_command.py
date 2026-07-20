@@ -1,0 +1,159 @@
+"""Unit tests for /experts and /expert slash commands."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+from unittest.mock import patch
+
+from EvoScientist.commands.base import ChannelRuntime, CommandContext
+from EvoScientist.commands.implementation.experts import (
+    ExpertCommand,
+    ExpertsCommand,
+)
+
+
+class _FakeUI:
+    """Minimal CommandUI capturing outputs for assertion."""
+
+    supports_interactive = False
+
+    def __init__(self) -> None:
+        self.lines: list[tuple[str, str]] = []
+        self.mounted: list[Any] = []
+
+    def append_system(self, text: str, style: str = "dim") -> None:
+        self.lines.append((text, style))
+
+    def mount_renderable(self, renderable: Any) -> None:
+        self.mounted.append(renderable)
+
+
+@dataclass
+class _FakeSkillInfo:
+    """Enough of ``SkillInfo`` for the commands to render."""
+
+    name: str
+    description: str = ""
+    role: str = ""
+    default_dispatch: str = ""
+    type: str = "expert"
+    tags: list[str] = field(default_factory=list)
+    source: str = "builtin"
+
+
+def _make_ctx(active_teams: list[str] | None = None) -> tuple[CommandContext, _FakeUI]:
+    ui = _FakeUI()
+    runtime = ChannelRuntime()
+    if active_teams:
+        runtime.active_teams = list(active_teams)
+    ctx = CommandContext(
+        agent=None,
+        thread_id="t1",
+        ui=ui,
+        channel_runtime=runtime,
+    )
+    return ctx, ui
+
+
+class TestExpertsList:
+    async def test_lists_installed_experts_in_table(self):
+        ctx, ui = _make_ctx()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[
+                _FakeSkillInfo(
+                    name="idea-brainstorm",
+                    role="Research idea brainstormer",
+                    default_dispatch="sync",
+                ),
+            ],
+        ):
+            await ExpertsCommand().execute(ctx, args=[])
+        # A Rich Table was mounted, and the no-experts-summoned hint appeared.
+        assert len(ui.mounted) == 1
+        assert any("No experts summoned" in text for text, _ in ui.lines)
+
+    async def test_empty_list_prints_help_hint(self):
+        ctx, ui = _make_ctx()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[],
+        ):
+            await ExpertsCommand().execute(ctx, args=[])
+        assert any("No expert skills installed" in text for text, _ in ui.lines)
+        assert not ui.mounted
+
+    async def test_active_expert_marked_in_table(self):
+        ctx, ui = _make_ctx(active_teams=["idea-brainstorm"])
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[
+                _FakeSkillInfo(
+                    name="idea-brainstorm",
+                    role="Research idea brainstormer",
+                    default_dispatch="sync",
+                ),
+            ],
+        ):
+            await ExpertsCommand().execute(ctx, args=[])
+        assert any("Active: idea-brainstorm" in text for text, _ in ui.lines)
+
+
+class TestExpertToggle:
+    async def test_missing_arg_prints_usage(self):
+        ctx, ui = _make_ctx()
+        await ExpertCommand().execute(ctx, args=[])
+        assert any("Usage:" in text for text, _ in ui.lines)
+
+    async def test_unknown_expert_errors(self):
+        ctx, ui = _make_ctx()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_FakeSkillInfo(name="idea-brainstorm")],
+        ):
+            await ExpertCommand().execute(ctx, args=["not-an-expert"])
+        assert any(
+            "No expert skill named 'not-an-expert'" in text for text, _ in ui.lines
+        )
+        assert ctx.channel_runtime.active_teams == []
+
+    async def test_summon_adds_to_active_teams(self):
+        ctx, ui = _make_ctx()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_FakeSkillInfo(name="idea-brainstorm")],
+        ):
+            await ExpertCommand().execute(ctx, args=["idea-brainstorm"])
+        assert ctx.channel_runtime.active_teams == ["idea-brainstorm"]
+        assert any("Summoned expert: idea-brainstorm" in text for text, _ in ui.lines)
+
+    async def test_toggle_releases_when_already_summoned(self):
+        ctx, ui = _make_ctx(active_teams=["idea-brainstorm"])
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_FakeSkillInfo(name="idea-brainstorm")],
+        ):
+            await ExpertCommand().execute(ctx, args=["idea-brainstorm"])
+        assert ctx.channel_runtime.active_teams == []
+        assert any("Released expert: idea-brainstorm" in text for text, _ in ui.lines)
+
+    async def test_clear_releases_all(self):
+        ctx, ui = _make_ctx(active_teams=["idea-brainstorm", "second"])
+        await ExpertCommand().execute(ctx, args=["clear"])
+        assert ctx.channel_runtime.active_teams == []
+        assert any(
+            "Released experts: idea-brainstorm, second" in text for text, _ in ui.lines
+        )
+
+    async def test_clear_on_empty_list_reports_nothing_to_do(self):
+        ctx, ui = _make_ctx()
+        await ExpertCommand().execute(ctx, args=["clear"])
+        assert ctx.channel_runtime.active_teams == []
+        assert any("No experts summoned" in text for text, _ in ui.lines)
+
+    async def test_no_channel_runtime_prints_warning(self):
+        ui = _FakeUI()
+        ctx = CommandContext(agent=None, thread_id="t1", ui=ui, channel_runtime=None)
+        await ExpertCommand().execute(ctx, args=["idea-brainstorm"])
+        assert any("/expert requires a session runtime" in text for text, _ in ui.lines)
