@@ -515,6 +515,7 @@ def run_textual_interactive(
             CompactingWidget,
             LoadingWidget,
             MCPLoaderWidget,
+            PanelWidget,
             SubAgentWidget,
             SummarizationWidget,
             SystemMessage,
@@ -1579,6 +1580,7 @@ def run_textual_interactive(
             todo_w: TodoWidget | None = None
             tool_widgets: dict[str, ToolCallWidget] = {}
             subagent_widgets: dict[str, SubAgentWidget] = {}
+            panel_widgets: dict[str, PanelWidget] = {}
 
             @dataclass
             class _ResponseDisplayState:
@@ -2083,6 +2085,37 @@ def run_textual_interactive(
                             sa_w = _get_sa_widget(instance_id, event.get("name", ""))
                             if sa_w is not None:
                                 sa_w.finalize()
+
+                        elif event_type == "panel_dispatch_start":
+                            eval_id = event.get("eval_id", "") or "_unbatched"
+                            panel_w = panel_widgets.get(eval_id)
+                            if panel_w is None:
+                                panel_w = PanelWidget(eval_id)
+                                await container.mount(panel_w)
+                                panel_widgets[eval_id] = panel_w
+                            await panel_w.start_dispatch(
+                                event["id"],
+                                event.get("subagent_type", ""),
+                                event.get("label", "") or event.get("description", ""),
+                            )
+
+                        elif event_type == "panel_dispatch_complete":
+                            eval_id = event.get("eval_id", "") or "_unbatched"
+                            panel_w = panel_widgets.get(eval_id)
+                            if panel_w is not None:
+                                panel_w.complete_dispatch(
+                                    event["id"], int(event.get("duration_ms", 0))
+                                )
+
+                        elif event_type == "panel_dispatch_error":
+                            eval_id = event.get("eval_id", "") or "_unbatched"
+                            panel_w = panel_widgets.get(eval_id)
+                            if panel_w is not None:
+                                panel_w.fail_dispatch(
+                                    event["id"],
+                                    int(event.get("duration_ms", 0)),
+                                    event.get("error", ""),
+                                )
 
                         elif event_type == "ask_user":
                             questions = event.get("questions", [])
