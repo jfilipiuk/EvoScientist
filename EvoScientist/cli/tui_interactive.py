@@ -2346,6 +2346,21 @@ def run_textual_interactive(
                                 sa_w.finalize()
                             except Exception:
                                 pass
+                    # Finalize any still-running panel dispatches so their
+                    # per-row spinner timers stop instead of ticking forever.
+                    # Without this, a mid-dispatch cancellation leaks the
+                    # PanelWidget's 100ms interval timer indefinitely — no
+                    # reference remains to fix it after this scope exits.
+                    for panel_w in panel_widgets.values():
+                        if panel_w._is_active:
+                            for dispatch_id, row in list(panel_w._rows.items()):
+                                if row._status == "running":
+                                    try:
+                                        panel_w.fail_dispatch(
+                                            dispatch_id, 0, "interrupted"
+                                        )
+                                    except Exception:
+                                        pass
                     # Finalize thinking widget
                     if thinking_w is not None and thinking_w._is_active:
                         try:
