@@ -1018,6 +1018,26 @@ class TestParseSkillMdExpertFields:
         assert result.avatar_hint == "atom"
         assert result.default_dispatch == "panel"
 
+    def test_body_populated_from_skill_md(self, tmp_path):
+        """`SkillInfo.body` carries the post-frontmatter content so the expert
+        container factory can build the system_prompt without re-reading disk."""
+        skill_dir = _write_expert_skill(tmp_path, "expert-body")
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert "# expert-body" in result.body
+        assert "Expert-skill body." in result.body
+        # Frontmatter fences must NOT leak into the body.
+        assert "---" not in result.body
+
+    def test_body_captured_when_no_frontmatter(self, tmp_path):
+        """Skills without a frontmatter block still cache their full text as
+        the body — the expert-container factory can then use it without a
+        second disk read."""
+        skill_dir = tmp_path / "no-frontmatter"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("Just body content, no fences.\n")
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.body.strip() == "Just body content, no fences."
+
     def test_unknown_type_falls_back_to_utility(self, tmp_path):
         """A typo in `type` (e.g. `charcter`) must not silently register as an expert."""
         skill_dir = tmp_path / "typo-skill"

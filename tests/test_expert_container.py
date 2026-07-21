@@ -100,6 +100,21 @@ class TestBodyOf:
         assert "# Body Only" in body
         assert "Content here." in body
 
+    def test_prefers_cached_body_over_disk_read(self, tmp_path):
+        """When ``SkillInfo.body`` is populated (the ``_parse_skill_md`` path),
+        ``_body_of`` uses it directly without touching disk. Guards against
+        the double-read regression flagged by pre-PR review."""
+        info = SkillInfo(
+            name="cached",
+            description="d",
+            path=tmp_path / "does-not-exist",
+            source="workspace",
+            type="expert",
+            body="Cached body content from SkillInfo.",
+        )
+        body = _body_of(info)
+        assert body == "Cached body content from SkillInfo."
+
 
 # =============================================================================
 # _compose_system_prompt
