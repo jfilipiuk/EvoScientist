@@ -2,10 +2,10 @@
 
 Reads ``configurable.active_teams: list[str]`` on every model call and
 appends a system-prompt cue biasing the main agent to consult the
-user-summoned expert(s) via ``task({subagent_type: ...})``.
+user-invited expert(s) via ``task({subagent_type: ...})``.
 
 Backend-stateless team binding: WebUI sends ``active_teams`` on every
-``stream.submit()`` for as long as the summoned expert is active; this
+``stream.submit()`` for as long as the invited expert is active; this
 middleware reads it fresh per turn via ``langgraph.config.get_config()``.
 Matches the plan's decision to reach for the ``configurable`` primitive
 rather than a server-side thread-state store (CLAUDE.md #5).
@@ -44,7 +44,7 @@ from langchain.agents.middleware.types import (
 
 _TEMPLATE_SINGLE = (
     "<active_expert>\n"
-    "The user has activated the expert `{expert}` for this thread. "
+    "The user has invited the expert `{expert}` to this thread. "
     "Consult it via `task({{subagent_type: '{expert}', ...}})` for "
     "requests within its scope. It stays available for the whole session "
     "until the user dismisses it.\n"
@@ -53,7 +53,7 @@ _TEMPLATE_SINGLE = (
 
 _TEMPLATE_MULTI = (
     "<active_experts>\n"
-    "The user has activated the following experts for this thread: "
+    "The user has invited the following experts to this thread: "
     "{experts}. Consult any of them via "
     "`task({{subagent_type: '<expert_name>', ...}})` based on which fits "
     "the current request. Do not consult an expert if the request is "

@@ -4,8 +4,12 @@
 ``/expert <name>`` — toggle an expert into the current session's
 ``active_teams`` list; the next turn's ``configurable.active_teams`` picks
 this up and ``ActiveTeamMiddleware`` biases the main-agent's delegation
-toward the summoned expert(s).
+toward the invited expert(s).
 ``/expert clear`` — reset the list.
+
+User-facing verbs match the WebUI gallery: **invite** to add an expert,
+**dismiss** to remove one. Internal state field stays ``active_teams``
+for wire compatibility.
 
 Backing store is ``ChannelRuntime.active_teams`` (see
 ``EvoScientist/commands/base.py``). WebUI users get the same effect via
@@ -66,16 +70,16 @@ class ExpertsCommand(Command):
             )
         else:
             ctx.ui.append_system(
-                "No experts summoned. `/expert <name>` to summon one.",
+                "No experts invited. `/expert <name>` to invite one.",
                 style="dim",
             )
 
 
 class ExpertCommand(Command):
-    """Summon, release, or clear expert skills for the current thread."""
+    """Invite, dismiss, or clear expert skills for the current thread."""
 
     name: ClassVar[str] = "/expert"
-    description: ClassVar[str] = "Summon or release an expert skill"
+    description: ClassVar[str] = "Invite or dismiss an expert skill"
     category: ClassVar[str] = "Experts"
     arguments: ClassVar[list[Argument]] = [
         Argument(
@@ -86,7 +90,7 @@ class ExpertCommand(Command):
         )
     ]
     subcommands: ClassVar[list[SubCommand]] = [
-        SubCommand("clear", "Release all summoned experts"),
+        SubCommand("clear", "Dismiss all invited experts"),
     ]
 
     def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
@@ -104,7 +108,7 @@ class ExpertCommand(Command):
             ]
         except Exception:
             candidates = []
-        candidates.append(("clear", "Release all summoned experts"))
+        candidates.append(("clear", "Dismiss all invited experts"))
         return [(name, desc) for name, desc in candidates if name.startswith(prefix)]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
@@ -118,11 +122,11 @@ class ExpertCommand(Command):
 
         if not args:
             ctx.ui.append_system(
-                "Usage: /expert <name>   toggle an expert into the summon list",
+                "Usage: /expert <name>   toggle an expert into the invited list",
                 style="yellow",
             )
             ctx.ui.append_system(
-                "       /expert clear    release all summoned experts",
+                "       /expert clear    dismiss all invited experts",
                 style="dim",
             )
             return
@@ -130,12 +134,12 @@ class ExpertCommand(Command):
         target = args[0].strip()
         if target.lower() == "clear":
             if not runtime.active_teams:
-                ctx.ui.append_system("No experts summoned.", style="dim")
+                ctx.ui.append_system("No experts invited.", style="dim")
                 return
-            released = list(runtime.active_teams)
+            dismissed = list(runtime.active_teams)
             runtime.active_teams = []
             ctx.ui.append_system(
-                f"Released experts: {', '.join(released)}", style="dim"
+                f"Dismissed experts: {', '.join(dismissed)}", style="dim"
             )
             return
 
@@ -151,10 +155,10 @@ class ExpertCommand(Command):
 
         if target in runtime.active_teams:
             runtime.active_teams = [n for n in runtime.active_teams if n != target]
-            ctx.ui.append_system(f"Released expert: {target}", style="dim")
+            ctx.ui.append_system(f"Dismissed expert: {target}", style="dim")
         else:
             runtime.active_teams = [*runtime.active_teams, target]
-            ctx.ui.append_system(f"Summoned expert: {target}", style="green")
+            ctx.ui.append_system(f"Invited expert: {target}", style="green")
         if runtime.active_teams:
             ctx.ui.append_system(
                 f"Active: {', '.join(runtime.active_teams)}", style="dim"
