@@ -494,7 +494,12 @@ def _build_base_kwargs(
     from .utils import load_subagents
 
     cfg = cfg if cfg is not None else _ensure_config()
-    tool_registry = {"think_tool": think_tool}
+    # `skill_manager` is registered here in addition to `base_tools` because
+    # expert subagents resolve their default toolset from `tool_registry` (see
+    # `_DEFAULT_EXPERT_TOOLS` in expert_container.py). Without this entry the
+    # tool silently misses from every expert sub-agent — e.g. idea-brainstorm
+    # can't run its `paper-navigator` precondition check.
+    tool_registry = {"think_tool": think_tool, "skill_manager": skill_manager}
     if os.environ.get("TAVILY_API_KEY"):
         tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
@@ -564,7 +569,10 @@ def load_mcp_and_build_kwargs(
             workspace_dir=workspace_dir,
         )
 
-    tool_registry = {"think_tool": think_tool}
+    # Match `_build_base_kwargs`: register `skill_manager` in the registry so
+    # expert subagents (which resolve tools via `_DEFAULT_EXPERT_TOOLS` from
+    # `expert_container.py`) actually get it.
+    tool_registry = {"think_tool": think_tool, "skill_manager": skill_manager}
     if os.environ.get("TAVILY_API_KEY"):
         tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
