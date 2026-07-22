@@ -635,6 +635,80 @@ class TestStartLanggraphDevCapturesLogOffset:
         assert captured["offset"] == 0
 
 
+class TestStartLanggraphDevPropagatesPort:
+    """``start_langgraph_dev`` must export the effective bind port into the
+    subprocess env as ``EVOSCIENTIST_LANGGRAPH_DEV_PORT`` so the deployed
+    main agent's ``cfg.langgraph_dev_port`` matches what langgraph dev
+    actually bound to. Without this, ``EvoSci deploy --port X`` binds to X
+    but the deployed agent reads the persisted ``langgraph_dev_port``
+    (whatever ``EvoSci config set langgraph_dev_port`` last wrote), and
+    every ``start_async_task`` fails with "All connection attempts failed"
+    because the self-loop URL points at an unbound port.
+    """
+
+    def _patch_prereqs(self, tmp_path, monkeypatch):
+        """Same prereq patching as ``TestStartLanggraphDevCapturesLogOffset``
+        so we can invoke ``start_langgraph_dev`` without a real CLI."""
+        pid_dir = tmp_path / "pids"
+        log = tmp_path / "langgraph_dev.log"
+        monkeypatch.setattr(
+            manager,
+            "RUNTIME",
+            dataclasses.replace(
+                manager.LanggraphRuntimePaths.for_directory(pid_dir),
+                log_file=log,
+            ),
+        )
+        monkeypatch.setattr(manager, "_can_bind_port", lambda port: True)
+        fake_config = tmp_path / "langgraph.json"
+        fake_config.write_text("{}")
+        monkeypatch.setattr(manager, "_langgraph_exe", lambda: "/fake/langgraph")
+        monkeypatch.setattr(manager, "_packaged_langgraph_config", lambda: fake_config)
+
+    def test_env_carries_explicit_bind_port(self, tmp_path, monkeypatch):
+        """The ``env`` passed to Popen must set the env var to ``str(port)``
+        matching whatever the caller resolved. This is the load-bearing
+        assertion for the fix."""
+        self._patch_prereqs(tmp_path, monkeypatch)
+        captured: dict = {}
+
+        def _fake_popen(args, **kwargs):
+            captured["env"] = kwargs["env"]
+            raise FileNotFoundError("stop before real spawn")
+
+        monkeypatch.setattr(
+            "EvoScientist.langgraph_dev.manager.subprocess.Popen", _fake_popen
+        )
+        try:
+            manager.start_langgraph_dev(workspace_dir=tmp_path, port=6617)
+        except FileNotFoundError:
+            pass
+        assert captured["env"]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6617"
+
+    def test_env_strips_inherited_value_before_setting(self, tmp_path, monkeypatch):
+        """A stray parent-shell export of ``EVOSCIENTIST_LANGGRAPH_DEV_PORT``
+        must NOT shadow the caller-resolved bind port. The fix's ``pop``
+        before ``set`` guarantees this, but a future refactor could miss it —
+        pinning the invariant here."""
+        monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "9999")
+        self._patch_prereqs(tmp_path, monkeypatch)
+        captured: dict = {}
+
+        def _fake_popen(args, **kwargs):
+            captured["env"] = kwargs["env"]
+            raise FileNotFoundError("stop before real spawn")
+
+        monkeypatch.setattr(
+            "EvoScientist.langgraph_dev.manager.subprocess.Popen", _fake_popen
+        )
+        try:
+            manager.start_langgraph_dev(workspace_dir=tmp_path, port=6606)
+        except FileNotFoundError:
+            pass
+        # Parent's 9999 stripped; caller's 6606 wins.
+        assert captured["env"]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6606"
+
+
 # =============================================================================
 # read_tunnel_url
 # =============================================================================
