@@ -53,7 +53,7 @@ def _body_of(skill_info: SkillInfo) -> str:
     skill_md = skill_info.path / "SKILL.md"
     try:
         content = skill_md.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         _logger.warning(
             "Expert skill %r: could not read SKILL.md at %s (%s)",
             skill_info.name,

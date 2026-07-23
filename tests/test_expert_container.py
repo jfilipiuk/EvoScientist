@@ -90,6 +90,18 @@ class TestBodyOf:
         # Warning surfaced — SEV so the malformed skill isn't invisible.
         assert any("could not read SKILL.md" in r.message for r in caplog.records)
 
+    def test_returns_empty_on_non_utf8_file(self, tmp_path, caplog):
+        # A SKILL.md whose bytes aren't valid UTF-8. `read_text` raises
+        # UnicodeDecodeError (not OSError); the factory must degrade to an
+        # empty body rather than aborting agent construction.
+        skill_dir = tmp_path / "bad-utf8"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_bytes(b"\xff\xfe garbage")
+        info = _skill_info(skill_dir, name="bad-utf8")
+        body = _body_of(info)
+        assert body == ""
+        assert any("could not read SKILL.md" in r.message for r in caplog.records)
+
     def test_handles_no_frontmatter(self, tmp_path):
         """A SKILL.md with no frontmatter — body is the whole file."""
         skill_dir = tmp_path / "no-fm"
