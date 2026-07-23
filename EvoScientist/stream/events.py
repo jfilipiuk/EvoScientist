@@ -835,9 +835,10 @@ async def stream_agent_events(
 
         events = SessionEventSink()
 
-    configurable: dict[str, Any] = {"thread_id": thread_id}
-    if configurable_extra:
-        configurable.update(configurable_extra)
+    configurable: dict[str, Any] = {
+        **(configurable_extra or {}),
+        "thread_id": thread_id,
+    }
     config: dict[str, Any] = {"configurable": configurable}
     if metadata:
         config["metadata"] = metadata
