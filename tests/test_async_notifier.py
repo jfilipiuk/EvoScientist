@@ -316,6 +316,39 @@ def test_drain_returns_all_pending_and_empties_queue():
     assert async_notifier._notification_queue.empty()
 
 
+def test_drain_thread_notifications_returns_per_thread_only():
+    """drain_thread_notifications must NOT include the unrouted bucket."""
+    from EvoScientist.cli.async_notifier import drain_thread_notifications
+
+    # Two notifications on thread-A, one unrouted.
+    async_notifier._enqueue(
+        async_notifier.AsyncTaskNotification(
+            "t1", "x", "success", "", "", origin_cli_thread_id="thread-A"
+        )
+    )
+    async_notifier._enqueue(
+        async_notifier.AsyncTaskNotification(
+            "t2", "x", "success", "", "", origin_cli_thread_id="thread-A"
+        )
+    )
+    async_notifier._enqueue(
+        async_notifier.AsyncTaskNotification("u1", "x", "success", "", "")
+    )
+
+    got = drain_thread_notifications("thread-A")
+    assert [n.task_id for n in got] == ["t1", "t2"]
+    # Unrouted bucket must NOT be drained by this helper.
+    unrouted = async_notifier.drain_notifications()
+    assert [n.task_id for n in unrouted] == ["u1"]
+
+
+def test_drain_thread_notifications_empty_when_no_queue_for_thread():
+    """Unknown thread_id returns an empty list, never raises."""
+    from EvoScientist.cli.async_notifier import drain_thread_notifications
+
+    assert drain_thread_notifications("no-such-thread") == []
+
+
 def test_dedup_skips_tasks_already_checked_after_terminal():
     """dedup_notifications skips tasks with terminal status and last_checked_at >= last_updated_at."""
     async_tasks: async_notifier.AsyncTasksState = {

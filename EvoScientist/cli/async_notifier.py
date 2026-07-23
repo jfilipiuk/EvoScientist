@@ -452,6 +452,28 @@ def drain_notifications(
     return items
 
 
+def drain_thread_notifications(thread_id: str) -> list[AsyncTaskNotification]:
+    """Pull pending notifications for ``thread_id`` only (non-blocking).
+
+    Unlike :func:`drain_notifications`, this does NOT include the unrouted
+    bucket. Callers that only want notifications explicitly routed to their
+    thread use this — the WebUI SSE endpoint at
+    ``/api/async-notifications/stream/{thread_id}`` specifically, which
+    holds one stream open per (browser tab, thread) pair.
+
+    Multi-tab safety: unrouted notifications (``origin_cli_thread_id=None``)
+    would otherwise be broadcast to every open stream and duplicate the
+    injected turn across unrelated conversations. The TUI drain path
+    (``drain_notifications``) includes the unrouted bucket by design — it
+    has a single consumer, so duplication is not a concern there.
+    """
+    with _notifications_lock:
+        q = _notifications_by_thread.get(thread_id)
+    if q is None:
+        return []
+    return _drain_one_queue(q)
+
+
 def dedup_notifications(
     notifs: list[AsyncTaskNotification],
     async_tasks: AsyncTasksState | None,

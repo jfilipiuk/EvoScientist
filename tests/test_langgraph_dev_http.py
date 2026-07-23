@@ -7,12 +7,31 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
 from starlette.testclient import TestClient
 
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.langgraph_dev.http import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _reset_notifier_queues():
+    """Clear the notifier's module-level queues before and after every test.
+
+    The notifier state is module-global (``_notifications_by_thread`` +
+    ``_unrouted_queue``) and pollutes across tests otherwise — a routed
+    notification enqueued but never drained by a test that only inspected
+    response metadata will surface in the next test's ``drain_notifications``
+    call. Autouse gives us a fresh queue per test without every test having
+    to remember the setup.
+    """
+    from EvoScientist.cli import async_notifier
+
+    async_notifier.drain_notifications()  # clear all buckets
+    yield
+    async_notifier.drain_notifications()
 
 
 def test_get_models_returns_entries_and_default():
@@ -161,3 +180,158 @@ def test_ollama_discovery_skipped_when_base_url_absent():
         {"name": n, "model_id": m, "provider": p}
         for n, m, p in list_models_by_provider()
     ]
+
+
+# ============================================================================
+# /api/async-notifications/stream/{thread_id}
+# ============================================================================
+
+# SSE tests drive the underlying async generator directly with a fake
+# Request. Going through Starlette's ``TestClient.stream()`` deadlocks
+# against an infinite server-side loop: the client's sync httpx transport
+# has no clean way to signal disconnect between yields, so ``iter_lines()``
+# blocks waiting for content after the first line while the generator's
+# ``asyncio.sleep`` keeps ticking. Unit-testing the generator instead
+# gives deterministic control over the loop's exit condition (via the
+# fake request's ``is_disconnected``) and covers the same contract:
+# per-thread filtering, wire schema, unrouted exclusion.
+
+
+class _FakeRequest:
+    """Minimal Request stand-in — reports connected until asked otherwise.
+
+    ``stream_async_notifications`` only touches ``path_params`` and
+    ``is_disconnected()`` on the Request, so a full Starlette Request is
+    overkill. Setting ``_disconnect_after`` bounds the loop for tests
+    that need to observe multiple iterations (e.g. heartbeat).
+    """
+
+    def __init__(self, thread_id: str, disconnect_after: int = 1) -> None:
+        self.path_params = {"thread_id": thread_id}
+        self._checks_remaining = disconnect_after
+
+    async def is_disconnected(self) -> bool:
+        if self._checks_remaining <= 0:
+            return True
+        self._checks_remaining -= 1
+        return False
+
+
+def _make_notification(task_id: str, thread_id: str | None = None):
+    from EvoScientist.cli.async_notifier import AsyncTaskNotification
+
+    return AsyncTaskNotification(
+        task_id=task_id,
+        agent_name="literature-review",
+        status="success",
+        received_at="2026-07-22T16:55:12Z",
+        prompt="Produce a literature review on continual learning strategies",
+        kind="agent",
+        origin_cli_thread_id=thread_id,
+    )
+
+
+async def _collect_events(request: _FakeRequest) -> list[str]:
+    """Drive the SSE handler's response body generator to completion and
+    collect every yielded chunk."""
+    from EvoScientist.langgraph_dev.http import stream_async_notifications
+
+    response = await stream_async_notifications(request)  # type: ignore[arg-type]
+    # StreamingResponse stores the async iterator on ``body_iterator``.
+    chunks: list[str] = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk if isinstance(chunk, str) else chunk.decode("utf-8"))
+    return chunks
+
+
+def _parse_data_events(chunks: list[str]) -> list[dict]:
+    """Extract the JSON payloads of all ``data:`` events from raw chunks."""
+    import json as _json
+
+    payloads: list[dict] = []
+    for chunk in chunks:
+        for line in chunk.splitlines():
+            if line.startswith("data:"):
+                payloads.append(_json.loads(line[len("data:") :].strip()))
+    return payloads
+
+
+async def test_sse_response_declares_event_stream_media_type():
+    """Response Content-Type must be text/event-stream so browsers activate
+    the EventSource parser path."""
+    from EvoScientist.cli import async_notifier
+    from EvoScientist.langgraph_dev.http import stream_async_notifications
+
+    async_notifier._enqueue(_make_notification("t-ct", "thread-ct"))
+    response = await stream_async_notifications(
+        _FakeRequest("thread-ct")  # type: ignore[arg-type]
+    )
+    assert response.media_type == "text/event-stream"
+
+
+async def test_sse_emits_enqueued_notification_for_matching_thread():
+    """A notification enqueued with origin_cli_thread_id=X must surface on
+    the stream for thread X, projected through the wire schema."""
+    from EvoScientist.cli import async_notifier
+
+    async_notifier._enqueue(_make_notification("t-match", "thread-match"))
+    chunks = await _collect_events(_FakeRequest("thread-match"))
+    payloads = _parse_data_events(chunks)
+
+    assert len(payloads) == 1
+    payload = payloads[0]
+    assert payload["task_id"] == "t-match"
+    assert payload["agent_name"] == "literature-review"
+    assert payload["status"] == "success"
+    assert payload["kind"] == "agent"
+    # Wire schema deliberately excludes origin_cli_thread_id (redundant —
+    # the client already knows the thread it opened the stream against).
+    assert "origin_cli_thread_id" not in payload
+
+
+async def test_sse_does_not_emit_unrouted_notifications():
+    """Unrouted notifications (origin_cli_thread_id=None) must NOT reach
+    the per-thread stream. This protects multi-tab clients: a notification
+    with no origin would otherwise be broadcast to every open SSE stream
+    and duplicate the injected turn across unrelated conversations."""
+    from EvoScientist.cli import async_notifier
+
+    async_notifier._enqueue(_make_notification("t-unrouted", None))
+    async_notifier._enqueue(_make_notification("t-routed", "thread-iso"))
+
+    chunks = await _collect_events(_FakeRequest("thread-iso"))
+    payloads = _parse_data_events(chunks)
+
+    assert [p["task_id"] for p in payloads] == ["t-routed"]
+    # Unrouted survivor stays in the unrouted queue.
+    unrouted = async_notifier.drain_notifications()
+    assert [n.task_id for n in unrouted] == ["t-unrouted"]
+
+
+async def test_sse_does_not_emit_notifications_for_other_threads():
+    """A notification for thread-A must not leak to thread-B's stream."""
+    from EvoScientist.cli import async_notifier
+
+    async_notifier._enqueue(_make_notification("t-A", "thread-A"))
+    async_notifier._enqueue(_make_notification("t-B", "thread-B"))
+
+    chunks = await _collect_events(_FakeRequest("thread-B"))
+    payloads = _parse_data_events(chunks)
+
+    assert [p["task_id"] for p in payloads] == ["t-B"]
+    # thread-A's notification survives — nobody drained it.
+    remaining = async_notifier.drain_thread_notifications("thread-A")
+    assert [n.task_id for n in remaining] == ["t-A"]
+
+
+async def test_sse_returns_cleanly_when_client_is_disconnected_before_first_check():
+    """If the client has already dropped by the time the loop opens, the
+    generator returns without touching the queue or yielding anything."""
+    from EvoScientist.cli import async_notifier
+
+    async_notifier._enqueue(_make_notification("t-x", "thread-x"))
+    chunks = await _collect_events(_FakeRequest("thread-x", disconnect_after=0))
+    assert chunks == []
+    # Notification stayed on the queue — the disconnected loop never drained.
+    remaining = async_notifier.drain_thread_notifications("thread-x")
+    assert [n.task_id for n in remaining] == ["t-x"]
