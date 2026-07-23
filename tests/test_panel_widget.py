@@ -58,20 +58,6 @@ class TestDispatchRow(unittest.TestCase):
         assert row._status == "running"
         assert row._duration_ms is None
 
-    def test_status_transitions(self):
-        from EvoScientist.cli.widgets.panel_widget import _DispatchRow
-
-        row = _DispatchRow("x", "y")
-        assert row._status == "running"
-        # Direct state change for unit test (no DOM).
-        row._status = "ok"
-        row._duration_ms = 1234
-        assert row._status == "ok"
-        assert row._duration_ms == 1234
-        row._status = "err"
-        row._error = "boom"
-        assert row._error == "boom"
-
     def test_elapsed_display_uses_recorded_duration(self):
         from EvoScientist.cli.widgets.panel_widget import _DispatchRow
 

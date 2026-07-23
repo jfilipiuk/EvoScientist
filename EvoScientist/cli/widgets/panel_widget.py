@@ -20,7 +20,8 @@ from textual.containers import Vertical
 from textual.widget import Widget
 from textual.widgets import Static
 
-_SPINNER_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
+from ..status_bar import SPINNER_FRAMES
+
 _ROW_LABEL_MAX_CHARS = 48
 
 
@@ -55,7 +56,7 @@ class _DispatchRow(Widget):
     def render(self) -> Text:
         line = Text()
         if self._status == "running":
-            line.append(f"  {_SPINNER_FRAMES[self._frame]} ", style="cyan")
+            line.append(f"  {SPINNER_FRAMES[self._frame]} ", style="cyan")
         elif self._status == "ok":
             line.append("  \u2713 ", style="green")
         else:
@@ -76,7 +77,7 @@ class _DispatchRow(Widget):
 
     def tick(self) -> None:
         if self._status == "running":
-            self._frame = (self._frame + 1) % len(_SPINNER_FRAMES)
+            self._frame = (self._frame + 1) % len(SPINNER_FRAMES)
         self.refresh()
 
     def complete(self, duration_ms: int) -> None:
@@ -178,6 +179,21 @@ class PanelWidget(Vertical):
         if row is not None:
             row.fail(duration_ms, error)
         self._maybe_finalize()
+
+    def finalize_running(self, reason: str = "interrupted") -> None:
+        """Fail all still-running rows with their measured elapsed time.
+
+        Called from the TUI turn-cleanup ``finally`` so the 100ms interval
+        timer stops when a turn is cancelled mid-dispatch — without this,
+        no reference remains to stop the timer once the outer scope exits.
+        """
+        if not self._is_active:
+            return
+        now = time.monotonic()
+        for dispatch_id, row in list(self._rows.items()):
+            if row._status == "running":
+                elapsed_ms = int((now - row._started_at) * 1000)
+                self.fail_dispatch(dispatch_id, elapsed_ms, reason)
 
     def _maybe_finalize(self) -> None:
         if not self._is_active:
