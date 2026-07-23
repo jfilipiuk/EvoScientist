@@ -1046,7 +1046,15 @@ class TestSkillManagerInstall:
         assert "Path: /skills/solo-skill" in result
 
     def test_install_single_omits_host_path(self, tmp_path):
-        """Single install: host filesystem path must NOT appear."""
+        """Single install: no host filesystem path leaks into the response.
+
+        ``install_skill(source)`` defaults to ``global_install=True``, so the
+        skill lands under ``GLOBAL_SKILLS_DIR`` rather than ``USER_SKILLS_DIR``.
+        Checking against a narrower directory (e.g. workspace_dir) would pass
+        even without the scrub - the check has to cover every path the tool
+        might resolve to. ``tmp_path`` covers both patched dirs and the source
+        path used by ``install_skill``.
+        """
         from EvoScientist.tools.skill_manager import skill_manager
 
         workspace_dir = tmp_path / "workspace"
@@ -1063,9 +1071,7 @@ class TestSkillManagerInstall:
                 {"action": "install", "source": str(tmp_path / "leak-guard-install")}
             )
 
-        # The install target lands under workspace_dir; that host path must not
-        # leak into agent-visible output.
-        assert str(workspace_dir) not in result
+        assert str(tmp_path) not in result
 
     def test_install_batch_lists_each_skill_with_virtual_path(self, tmp_path):
         """Batch install: one block per installed skill, each with ``Path: /skills/<name>``."""
@@ -1090,6 +1096,10 @@ class TestSkillManagerInstall:
         assert "Successfully installed skill: beta" in result
         assert "Path: /skills/alpha" in result
         assert "Path: /skills/beta" in result
+        # Same leak guard as ``test_install_single_omits_host_path``: batch
+        # returns must not surface any host path either. Cover every dir the
+        # install might resolve to.
+        assert str(tmp_path) not in result
 
     def test_install_batch_all_fail_returns_error_list(self, tmp_path):
         """Batch install where every skill fails must not KeyError on the
