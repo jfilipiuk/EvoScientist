@@ -340,12 +340,10 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             frontmatter.get("description", "(no description)"),
             tags,
             type_=type_,
-            role=str(role) if not isinstance(role, str) else role,
-            byline=str(byline) if not isinstance(byline, str) else byline,
+            role=str(role),
+            byline=str(byline),
             capability_tags=capability_tags,
-            avatar_hint=str(avatar_hint)
-            if not isinstance(avatar_hint, str)
-            else avatar_hint,
+            avatar_hint=str(avatar_hint),
             default_dispatch=default_dispatch,
             body=body,
         )
