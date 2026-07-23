@@ -139,3 +139,60 @@ def test_non_dict_spec_error_includes_filename_and_name(tmp_path):
     )
     with pytest.raises(ValueError, match=r"weird\.yaml.*weird-agent"):
         load_subagents(config_path, tool_registry={})
+
+
+def test_missing_tool_on_sync_subagent_logs_warning(tmp_path, caplog):
+    """Sync sub-agents with a tool missing from the registry log at WARNING.
+
+    Sync sub-agents run in-process under the main agent and rely on the
+    in-process registry to wire every tool they declare. A missing tool
+    IS a genuine degradation — surfaces it as a warning.
+    """
+    config_path = _write_yaml(
+        tmp_path,
+        "planner.yaml",
+        """
+        planner-agent:
+          description: Plans experiments
+          system_prompt: ""
+          tools: [nonexistent_tool]
+        """,
+    )
+    with caplog.at_level("DEBUG", logger="EvoScientist.utils"):
+        subs = load_subagents(config_path, tool_registry={})
+    assert subs[0]["_async"] is False
+    assert subs[0]["tools"] == []
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("nonexistent_tool" in r.getMessage() for r in warnings)
+
+
+def test_missing_tool_on_async_subagent_logs_debug(tmp_path, caplog):
+    """Async sub-agents with a tool missing from the in-process registry log at DEBUG.
+
+    Async sub-agents are re-resolved against the deployed graph's own tool
+    registry (``subagents/_factory.py:59``) — the in-process registry is
+    intentionally minimal for them. A missing tool here is expected, not
+    degraded state; logging at WARNING every startup cries wolf.
+    """
+    config_path = _write_yaml(
+        tmp_path,
+        "scheduler.yaml",
+        """
+        scheduler:
+          description: Fires on cron
+          system_prompt: ""
+          tools: [nonexistent_tool]
+          async: true
+        """,
+    )
+    with caplog.at_level("DEBUG", logger="EvoScientist.utils"):
+        subs = load_subagents(config_path, tool_registry={})
+    assert subs[0]["_async"] is True
+    assert subs[0]["tools"] == []
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert not any("nonexistent_tool" in r.getMessage() for r in warnings)
+    debugs = [r for r in caplog.records if r.levelname == "DEBUG"]
+    assert any(
+        "nonexistent_tool" in r.getMessage() and "async graph" in r.getMessage()
+        for r in debugs
+    )

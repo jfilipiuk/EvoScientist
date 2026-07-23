@@ -212,18 +212,9 @@ def load_subagents(
         if "skills" in spec:
             subagent["skills"] = spec["skills"]
 
-        if "tools" in spec:
-            resolved = []
-            for t in spec["tools"]:
-                if t in tool_registry:
-                    resolved.append(tool_registry[t])
-                else:
-                    logger.warning(
-                        "Subagent %r: tool %r not in registry, skipping", name, t
-                    )
-            subagent["tools"] = resolved
-
-        # Internal field: carries the ``async:`` yaml flag through to
+        # Compute the async flag up-front so the tools-resolution block below
+        # can pick the right log level for missing tools. Internal field:
+        # carries the ``async:`` yaml flag through to
         # ``_maybe_swap_async_subagents`` so the swap doesn't need a second
         # yaml pass to discover async-flagged agents. Underscore prefix marks
         # it as internal — must be popped before passing to deepagents.
@@ -236,6 +227,29 @@ def load_subagents(
                 f"Subagent {name!r}: 'async' must be a boolean, "
                 f"got {type(async_val).__name__}: {async_val!r}"
             )
+
+        if "tools" in spec:
+            resolved = []
+            for t in spec["tools"]:
+                if t in tool_registry:
+                    resolved.append(tool_registry[t])
+                elif async_val:
+                    # Async sub-agents are re-resolved against the deployed
+                    # graph's own tool registry (see subagents/_factory.py) —
+                    # the in-process registry is intentionally minimal for
+                    # them. A missing tool here is expected, not degraded.
+                    logger.debug(
+                        "Subagent %r: tool %r not in the in-process registry; "
+                        "resolved by the async graph",
+                        name,
+                        t,
+                    )
+                else:
+                    logger.warning(
+                        "Subagent %r: tool %r not in registry, skipping", name, t
+                    )
+            subagent["tools"] = resolved
+
         subagent["_async"] = async_val
 
         return subagent
