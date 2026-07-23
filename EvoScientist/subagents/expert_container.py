@@ -136,10 +136,21 @@ def build_expert_subagent_specs(
     Thin wrapper over ``list_expert_skills()`` + ``build_expert_subagent_spec``.
     Called by the main-agent construction path (``_build_base_kwargs``) to
     fold experts into the ``subagents=[...]`` list.
+
+    Skips (with a warning) any expert whose SKILL.md body is empty — a
+    personaless expert advertised in the ``task`` tool schema would let the
+    orchestrator dispatch to a blank system prompt, a worse failure mode
+    than the expert being absent.
     """
     from ..tools.skills_manager import list_expert_skills
 
-    return [
-        build_expert_subagent_spec(info, tool_registry=tool_registry)
-        for info in list_expert_skills(include_system=include_system)
-    ]
+    specs: list[dict[str, Any]] = []
+    for info in list_expert_skills(include_system=include_system):
+        if not _body_of(info).strip():
+            _logger.warning(
+                "Expert skill %r: SKILL.md body is empty; skipping registration.",
+                info.name,
+            )
+            continue
+        specs.append(build_expert_subagent_spec(info, tool_registry=tool_registry))
+    return specs

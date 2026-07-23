@@ -280,6 +280,38 @@ description: Not an expert
                 registry["skill_manager"],
             ]
 
+    def test_skips_expert_with_empty_body(self, tmp_path, caplog):
+        # A well-formed expert-frontmatter skill whose body is only whitespace.
+        # Registering it would advertise a personaless expert in the `task`
+        # schema — cleaner to drop it and log.
+        _write_expert_skill_file(tmp_path, "expert-a")
+        blank = tmp_path / "expert-blank"
+        blank.mkdir()
+        (blank / "SKILL.md").write_text(
+            """---
+name: expert-blank
+description: An expert with no body
+type: expert
+role: blank
+---
+
+"""
+        )
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", tmp_path),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_dir),
+            patch("EvoScientist.EvoScientist.SKILLS_DIR", str(empty_dir)),
+        ):
+            specs = build_expert_subagent_specs(tool_registry={})
+
+        assert [s["name"] for s in specs] == ["expert-a"]
+        assert any(
+            "SKILL.md body is empty" in r.message and "expert-blank" in r.message
+            for r in caplog.records
+        )
+
     def test_returns_empty_when_no_expert_skills(self, tmp_path):
         # A utility skill only — no experts.
         util = tmp_path / "util-only"
