@@ -93,22 +93,31 @@ class ExpertCommand(Command):
         SubCommand("clear", "Dismiss all invited experts"),
     ]
 
+    _expert_candidates_cache: list[tuple[str, str]] | None = None
+
+    def _get_expert_candidates(self) -> list[tuple[str, str]]:
+        if self._expert_candidates_cache is None:
+            try:
+                from ...tools.skills_manager import list_expert_skills
+
+                self._expert_candidates_cache = [
+                    (s.name, s.role or s.description)
+                    for s in list_expert_skills(include_system=True)
+                ]
+            except Exception:
+                return []
+        return self._expert_candidates_cache
+
     def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
         """Complete expert names + the ``clear`` subcommand."""
         prefix = tokens[0].lower() if tokens else ""
         # Only complete at the first positional token; deeper is a usage error.
         if len(tokens) > 1 and tokens[1] != "":
             return []
-        try:
-            from ...tools.skills_manager import list_expert_skills
-
-            candidates = [
-                (s.name, s.role or s.description)
-                for s in list_expert_skills(include_system=True)
-            ]
-        except Exception:
-            candidates = []
-        candidates.append(("clear", "Dismiss all invited experts"))
+        candidates = [
+            *self._get_expert_candidates(),
+            ("clear", "Dismiss all invited experts"),
+        ]
         return [(name, desc) for name, desc in candidates if name.startswith(prefix)]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
