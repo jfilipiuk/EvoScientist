@@ -101,7 +101,7 @@ class ActiveTeamMiddleware(AgentMiddleware):
         experts = _read_active_teams()
         if not experts:
             return request
-        from deepagents.middleware._utils import append_to_system_message
+        from .utils import append_to_system_message
 
         new_system = append_to_system_message(
             request.system_message,
