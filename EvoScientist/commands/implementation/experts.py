@@ -110,15 +110,20 @@ class ExpertCommand(Command):
 
     def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
         """Complete expert names + the ``clear`` subcommand."""
-        prefix = tokens[0].lower() if tokens else ""
-        # Only complete at the first positional token; deeper is a usage error.
-        if len(tokens) > 1 and tokens[1] != "":
+        # /expert takes a single positional arg; anything past it (including a
+        # trailing space that turns tokens into ["name", ""]) has nothing to offer.
+        if len(tokens) > 1:
             return []
+        prefix = tokens[0].lower() if tokens else ""
         candidates = [
             *self._get_expert_candidates(),
             ("clear", "Dismiss all invited experts"),
         ]
-        return [(name, desc) for name, desc in candidates if name.startswith(prefix)]
+        matches = [(name, desc) for name, desc in candidates if name.startswith(prefix)]
+        # Exact match — argument already complete, hide the popup.
+        if len(matches) == 1 and matches[0][0] == prefix:
+            return []
+        return matches
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         runtime = ctx.channel_runtime
