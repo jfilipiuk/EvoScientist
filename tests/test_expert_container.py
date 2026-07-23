@@ -302,3 +302,110 @@ description: Utility
         ):
             specs = build_expert_subagent_specs(tool_registry={})
         assert specs == []
+
+
+# =============================================================================
+# _fold_expert_subagents (name-collision guard shared by both construction paths)
+# =============================================================================
+
+
+def _spec(name: str) -> dict:
+    """Minimal expert spec — the fold helper only reads ``name``."""
+    return {"name": name, "description": f"{name} expert"}
+
+
+class TestFoldExpertSubagents:
+    """Both ``_build_base_kwargs`` and ``load_mcp_and_build_kwargs`` delegate
+    to ``_fold_expert_subagents``, so testing the helper directly covers the
+    "same behaviour in both paths" reviewer requirement."""
+
+    def test_appends_expert_specs_when_no_collisions(self):
+        from EvoScientist.EvoScientist import _fold_expert_subagents
+
+        subs: list[dict] = [{"name": "research"}, {"name": "code"}]
+        with patch(
+            "EvoScientist.subagents.expert_container.build_expert_subagent_specs",
+            return_value=[_spec("idea-brainstorm"), _spec("critic")],
+        ):
+            _fold_expert_subagents(subs, tool_registry={})
+
+        assert [s["name"] for s in subs] == [
+            "research",
+            "code",
+            "idea-brainstorm",
+            "critic",
+        ]
+
+    def test_skips_expert_that_collides_with_yaml_subagent(self, caplog):
+        from EvoScientist.EvoScientist import _fold_expert_subagents
+
+        subs: list[dict] = [{"name": "research"}, {"name": "planner"}]
+        with patch(
+            "EvoScientist.subagents.expert_container.build_expert_subagent_specs",
+            return_value=[_spec("planner"), _spec("idea-brainstorm")],
+        ):
+            _fold_expert_subagents(subs, tool_registry={})
+
+        # Colliding expert dropped; non-colliding one appended.
+        assert [s["name"] for s in subs] == [
+            "research",
+            "planner",
+            "idea-brainstorm",
+        ]
+        # Original YAML `planner` untouched (not shadowed by the expert).
+        assert subs[1] == {"name": "planner"}
+        assert any(
+            "collides with an existing sub-agent name" in r.message
+            and "planner" in r.message
+            for r in caplog.records
+        )
+
+    def test_skips_duplicate_expert_names(self, caplog):
+        from EvoScientist.EvoScientist import _fold_expert_subagents
+
+        subs: list[dict] = []
+        with patch(
+            "EvoScientist.subagents.expert_container.build_expert_subagent_specs",
+            return_value=[_spec("critic"), _spec("critic")],
+        ):
+            _fold_expert_subagents(subs, tool_registry={})
+
+        assert [s["name"] for s in subs] == ["critic"]
+        assert any(
+            "collides with an existing sub-agent name" in r.message
+            and "critic" in r.message
+            for r in caplog.records
+        )
+
+    def test_reserves_general_purpose_name(self, caplog):
+        """The default subagent slot is reserved even when no ``general-purpose``
+        entry exists in ``subs`` yet — ``_ensure_general_purpose_subagent``
+        runs right after the fold and would otherwise treat the expert entry
+        as the default subagent, silently losing the DeepAgents default prompt."""
+        from EvoScientist.EvoScientist import _fold_expert_subagents
+
+        subs: list[dict] = [{"name": "research"}]
+        with patch(
+            "EvoScientist.subagents.expert_container.build_expert_subagent_specs",
+            return_value=[_spec("general-purpose")],
+        ):
+            _fold_expert_subagents(subs, tool_registry={})
+
+        assert [s["name"] for s in subs] == ["research"]
+        assert any(
+            "collides with an existing sub-agent name" in r.message
+            and "general-purpose" in r.message
+            for r in caplog.records
+        )
+
+    def test_forwards_tool_registry_to_specs_factory(self):
+        from EvoScientist.EvoScientist import _fold_expert_subagents
+
+        registry = {"think_tool": object()}
+        with patch(
+            "EvoScientist.subagents.expert_container.build_expert_subagent_specs",
+            return_value=[],
+        ) as mock_specs:
+            _fold_expert_subagents([], tool_registry=registry)
+
+        mock_specs.assert_called_once_with(tool_registry=registry)

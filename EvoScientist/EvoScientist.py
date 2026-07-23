@@ -382,6 +382,39 @@ def _ensure_general_purpose_subagent(subs: list[dict]) -> None:
     )
 
 
+def _fold_expert_subagents(subs: list[dict], tool_registry: dict) -> None:
+    """Append expert-skill sub-agent specs to ``subs``, guarding names.
+
+    Each installed expert skill becomes an in-process sub-agent entry so
+    the main agent's ``task`` tool (and the QuickJS ``task()`` global for
+    panel mode) can dispatch to it by name. Async-graph deploy of experts
+    is v2 territory — they live purely in the sync in-process registry.
+
+    Skips (with a warning) any expert whose ``name`` collides with a
+    subagent already in ``subs`` or with ``general-purpose``. The reserved
+    name matters because ``_ensure_general_purpose_subagent`` runs right
+    after this and early-returns when it sees the slot occupied — an expert
+    named ``general-purpose`` would silently take the slot and deepagents'
+    default subagent prompt would never reach the agent.
+    """
+    from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
+
+    from .subagents.expert_container import build_expert_subagent_specs
+
+    logger = logging.getLogger(__name__)
+    taken = {s.get("name") for s in subs} | {GENERAL_PURPOSE_SUBAGENT["name"]}
+    for spec in build_expert_subagent_specs(tool_registry=tool_registry):
+        name = spec["name"]
+        if name in taken:
+            logger.warning(
+                "Expert skill %r collides with an existing sub-agent name; skipping.",
+                name,
+            )
+            continue
+        taken.add(name)
+        subs.append(spec)
+
+
 def _maybe_swap_async_subagents(
     subs: list, middleware: list | None = None, *, cfg=None
 ) -> list:
@@ -508,14 +541,7 @@ def _build_base_kwargs(
         SUBAGENTS_CONFIG,
         tool_registry=tool_registry,
     )
-    # Fold in expert-skill sub-agents (agent-teams v1). Each installed expert
-    # skill becomes an in-process sub-agent entry so the main agent's `task`
-    # tool (and the QuickJS `task()` global for panel mode) can dispatch to
-    # it by name. Async-graph deploy of experts is v2 territory — for now
-    # they live purely in the sync in-process registry.
-    from .subagents.expert_container import build_expert_subagent_specs
-
-    subs.extend(build_expert_subagent_specs(tool_registry=tool_registry))
+    _fold_expert_subagents(subs, tool_registry)
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
         subs, workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
@@ -589,12 +615,7 @@ def load_mcp_and_build_kwargs(
         SUBAGENTS_CONFIG,
         tool_registry=registry,
     )
-    # Fold in expert-skill sub-agents (agent-teams v1). See the same block
-    # in `_build_base_kwargs` above for rationale — this MCP path mirrors it
-    # so both construction routes surface installed experts identically.
-    from .subagents.expert_container import build_expert_subagent_specs
-
-    subs.extend(build_expert_subagent_specs(tool_registry=registry))
+    _fold_expert_subagents(subs, registry)
 
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
