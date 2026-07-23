@@ -162,6 +162,17 @@ class PanelWidget(Vertical):
     ) -> None:
         if dispatch_id in self._rows:
             return
+        # Re-arm if the panel already finalized: a Promise.allSettled retry
+        # of a failed subset dispatches under the same eval_id, so a new
+        # start after _maybe_finalize() has stopped the timer must undo
+        # the three effects of finalize (latch, class, timer) or the new
+        # row's spinner/elapsed stay frozen and future completions never
+        # refresh the header.
+        if not self._is_active:
+            self._is_active = True
+            self.remove_class("--completed")
+            self._timer_handle = self.set_interval(0.1, self._tick)
+            self._render_footer()
         row = _DispatchRow(subagent_type, label)
         rows_container = self.query_one(".panel-rows", Vertical)
         await rows_container.mount(row)
