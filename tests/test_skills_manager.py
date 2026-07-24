@@ -1038,8 +1038,9 @@ class TestParseSkillMdExpertFields:
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.body.strip() == "Just body content, no fences."
 
-    def test_unknown_type_falls_back_to_utility(self, tmp_path):
-        """A typo in `type` (e.g. `charcter`) must not silently register as an expert."""
+    def test_unknown_type_falls_back_to_utility(self, tmp_path, caplog):
+        """A typo in `type` (e.g. `charcter`) must not silently register as an expert
+        and must log so authors can debug a missing-expert case."""
         skill_dir = tmp_path / "typo-skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
@@ -1055,9 +1056,10 @@ role: This should be ignored
         )
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "utility"
-        # Other expert fields DO parse when present, but the skill is
-        # only surfaced through expert routing when type=="expert".
-        # (No assertion on `role` here — that's design choice, not contract.)
+        assert any(
+            "unrecognized type" in r.message and "charcter" in r.message
+            for r in caplog.records
+        )
 
     def test_invalid_default_dispatch_falls_back_to_empty(self, tmp_path):
         skill_dir = tmp_path / "bad-dispatch"
@@ -1095,6 +1097,61 @@ capability_tags: alpha, beta, gamma
         )
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.capability_tags == ["alpha", "beta", "gamma"]
+
+    def test_unreadable_skill_md_returns_placeholder(self, tmp_path, caplog):
+        """A non-UTF-8 SKILL.md must degrade to an ``(unreadable)`` placeholder
+        rather than raise. ``list_skills`` sits on the agent-construction hot
+        path (via ``_fold_expert_subagents``); an uncaught ``UnicodeDecodeError``
+        would abort CLI startup for a single malformed skill in any tier."""
+        skill_dir = tmp_path / "bad-utf8"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_bytes(b"---\nname: bad\n---\n\xff\xfe")
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.name == "bad-utf8"
+        assert result.description == "(unreadable)"
+        assert result.type == "utility"
+        assert result.body == ""
+        assert any("could not read" in r.message for r in caplog.records)
+
+    def test_empty_name_value_coerces_to_parent_dir(self, tmp_path):
+        """A ``name:`` line with no value parses to ``None`` in YAML. Without
+        the ``.get(...) or parent.name`` guard, ``SkillInfo.name`` becomes
+        ``None`` and slips past the ``_fold_expert_subagents`` collision
+        check (a ``None``-named expert would land in the ``task`` schema)."""
+        skill_dir = tmp_path / "empty-name"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name:
+description: A skill with an empty name value
+type: expert
+role: some role
+---
+
+Body content.
+"""
+        )
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.name == "empty-name"
+
+    def test_invalid_frontmatter_yaml_warns(self, tmp_path, caplog):
+        """Malformed YAML frontmatter must return the ``(invalid frontmatter)``
+        placeholder AND log so the author sees why the skill didn't register."""
+        skill_dir = tmp_path / "bad-yaml"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: bad-yaml
+description: broken YAML below
+tags: [unterminated
+---
+
+Body.
+"""
+        )
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.description == "(invalid frontmatter)"
+        assert any("invalid frontmatter YAML" in r.message for r in caplog.records)
 
 
 class TestListExpertSkills:

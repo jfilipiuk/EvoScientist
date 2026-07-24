@@ -278,7 +278,28 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         SkillInfo with path set to the skill's parent directory.
     """
     parent = skill_md_path.parent
-    content = skill_md_path.read_text(encoding="utf-8")
+    try:
+        content = skill_md_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # ``_parse_skill_md`` runs during agent construction (via
+        # ``_fold_expert_subagents`` → ``list_skills``), so an unreadable
+        # SKILL.md in any tier must not abort the whole main-agent build or
+        # ``GET /api/teams``. Degrade to an "(unreadable)" placeholder so
+        # the entry stays visible in ``skill_manager list`` for debugging
+        # but never advances into expert registration (empty body →
+        # ``build_expert_subagent_specs`` skips it).
+        _logger.warning(
+            "Skill %r: could not read %s (%s); skipping.",
+            parent.name,
+            skill_md_path,
+            exc,
+        )
+        return SkillInfo(
+            name=parent.name,
+            description="(unreadable)",
+            path=parent,
+            source=source,
+        )
 
     def _info(
         name: str,
@@ -325,18 +346,29 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             if isinstance(metadata, dict):
                 tags = _normalize_tags(metadata.get("tags"))
         # Expert-skill fields. Only trusted when explicit; unknown
-        # ``type`` values silently fall back to "utility" so a typo
-        # doesn't accidentally register a skill as an expert.
+        # ``type`` values fall back to "utility" so a typo doesn't
+        # accidentally register a skill as an expert. Log the fallback
+        # so authors can debug a "why isn't my expert appearing" case.
         raw_type = frontmatter.get("type")
         type_ = raw_type if raw_type in ("expert", "utility") else "utility"
+        if raw_type is not None and raw_type != type_:
+            _logger.warning(
+                "Skill %r: unrecognized type %r in frontmatter; treating as utility.",
+                frontmatter.get("name") or parent.name,
+                raw_type,
+            )
         role = frontmatter.get("role") or ""
         byline = frontmatter.get("byline") or ""
         capability_tags = _normalize_tags(frontmatter.get("capability_tags"))
         avatar_hint = frontmatter.get("avatar_hint") or ""
         raw_dispatch = frontmatter.get("default_dispatch")
         default_dispatch = raw_dispatch if raw_dispatch in ("sync", "panel") else ""
+        # ``.get("name", parent.name)`` only defaults on missing key; a
+        # present-but-empty ``name:`` yields None, which would flow into
+        # ``SkillInfo.name`` and slip past the ``_fold_expert_subagents``
+        # collision guard. Coerce to the parent dir name in both cases.
         return _info(
-            frontmatter.get("name", parent.name),
+            frontmatter.get("name") or parent.name,
             frontmatter.get("description", "(no description)"),
             tags,
             type_=type_,
@@ -347,7 +379,13 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             default_dispatch=default_dispatch,
             body=body,
         )
-    except yaml.YAMLError:
+    except yaml.YAMLError as exc:
+        _logger.warning(
+            "Skill %r: invalid frontmatter YAML in %s (%s); using placeholder.",
+            parent.name,
+            skill_md_path,
+            exc,
+        )
         return _info(parent.name, "(invalid frontmatter)", body=body)
 
 
