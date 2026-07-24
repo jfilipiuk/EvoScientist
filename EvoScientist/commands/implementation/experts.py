@@ -26,6 +26,19 @@ from rich.table import Table
 from ..base import Argument, Command, CommandContext, SubCommand
 from ..manager import manager
 
+_expert_candidates_cache: list[tuple[str, str]] | None = None
+
+
+def invalidate_experts_cache() -> None:
+    """Reset the /expert completion cache.
+
+    Called after ``install_skill`` / ``uninstall_skill`` mutations so a
+    freshly installed expert shows up in the /expert popup on the next
+    keystroke.
+    """
+    global _expert_candidates_cache
+    _expert_candidates_cache = None
+
 
 class ExpertsCommand(Command):
     """List installed expert skills."""
@@ -93,20 +106,19 @@ class ExpertCommand(Command):
         SubCommand("clear", "Dismiss all invited experts"),
     ]
 
-    _expert_candidates_cache: list[tuple[str, str]] | None = None
-
     def _get_expert_candidates(self) -> list[tuple[str, str]]:
-        if self._expert_candidates_cache is None:
+        global _expert_candidates_cache
+        if _expert_candidates_cache is None:
             try:
                 from ...tools.skills_manager import list_expert_skills
 
-                self._expert_candidates_cache = [
+                _expert_candidates_cache = [
                     (s.name, s.role or s.description)
                     for s in list_expert_skills(include_system=True)
                 ]
             except Exception:
                 return []
-        return self._expert_candidates_cache
+        return _expert_candidates_cache
 
     def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
         """Complete expert names + the ``clear`` subcommand."""
