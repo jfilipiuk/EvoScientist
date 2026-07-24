@@ -2091,8 +2091,11 @@ def run_textual_interactive(
                             panel_w = panel_widgets.get(eval_id)
                             if panel_w is None:
                                 panel_w = PanelWidget(eval_id)
-                                await container.mount(panel_w)
+                                # Register before awaiting mount: a cancel
+                                # during the await would otherwise orphan a
+                                # ticking panel outside the cleanup loop.
                                 panel_widgets[eval_id] = panel_w
+                                await container.mount(panel_w)
                             await panel_w.start_dispatch(
                                 event["id"],
                                 event.get("subagent_type", ""),
