@@ -155,3 +155,40 @@ class TestPanelWidgetReentry:
             assert panel._is_active is False
             assert panel._timer_handle is None
             assert panel.has_class("--completed")
+
+
+class TestPanelWidgetFinalizeEmpty:
+    """Regression: ``finalize_running`` stops the timer even with zero
+    running rows.
+
+    The timer is armed by ``on_mount`` (first-dispatch case) or re-armed
+    by ``start_dispatch`` (retry-failed-subset case) before any row lands
+    in the "running" state. If cancel arrives before the first row is
+    registered, ``finalize_running``'s loop body never runs, so
+    ``_maybe_finalize`` must be called unconditionally after the loop.
+    """
+
+    async def test_finalize_running_stops_timer_with_no_rows(self):
+        from textual.app import App, ComposeResult
+
+        from EvoScientist.cli.widgets.panel_widget import PanelWidget
+
+        class _PanelApp(App[None]):
+            def compose(self) -> ComposeResult:
+                yield PanelWidget("eval-empty")
+
+        app = _PanelApp()
+        async with app.run_test(size=(120, 20)) as pilot:
+            panel = app.query_one(PanelWidget)
+            await pilot.pause()
+
+            # Timer armed by on_mount, no dispatches yet.
+            assert panel._is_active is True
+            assert panel._timer_handle is not None
+            assert panel._rows == {}
+
+            panel.finalize_running()
+
+            assert panel._is_active is False
+            assert panel._timer_handle is None
+            assert panel.has_class("--completed")

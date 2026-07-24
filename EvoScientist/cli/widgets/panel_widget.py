@@ -205,6 +205,12 @@ class PanelWidget(Vertical):
             if row._status == "running":
                 elapsed_ms = int((now - row._started_at) * 1000)
                 self.fail_dispatch(dispatch_id, elapsed_ms, reason)
+        # Cover the zero-running-rows case: cancel-during-mount can leave
+        # the timer armed with either no rows registered (first dispatch)
+        # or every registered row already terminal (allSettled retry).
+        # The loop skips both, so call _maybe_finalize unconditionally —
+        # it is a no-op once _is_active has flipped.
+        self._maybe_finalize()
 
     def _maybe_finalize(self) -> None:
         if not self._is_active:
