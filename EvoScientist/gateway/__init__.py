@@ -23,6 +23,7 @@ from .types import (
     GraphTarget,
     RunRequest,
     ThreadResolution,
+    ThreadStateSnapshot,
     ThreadStore,
 )
 
@@ -79,6 +80,7 @@ __all__ = [
     "RuntimeGatewayBackend",
     "RuntimeGateways",
     "ThreadResolution",
+    "ThreadStateSnapshot",
     "ThreadStore",
     "background_runs",
     "create_runtime_gateways",

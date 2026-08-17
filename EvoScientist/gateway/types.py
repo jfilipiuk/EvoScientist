@@ -20,6 +20,22 @@ DEFAULT_GRAPH_ID = "EvoScientist"
 
 
 @dataclass(frozen=True, slots=True)
+class ThreadStateSnapshot:
+    """Graph state snapshot with checkpoint identity and pending-task metadata.
+
+    Exposes the fields proactive checks need beyond raw ``values``:
+    ``checkpoint_id`` for stale-source detection (compare before and after
+    a shadow turn), ``next`` to distinguish a clean state from a parked
+    graph, and ``interrupts`` to gate on pending human-in-the-loop.
+    """
+
+    values: GraphStateValues
+    checkpoint_id: str | None
+    next: tuple[str, ...]
+    interrupts: tuple[Any, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class GraphTarget:
     """Identifies the graph/workspace a thread operation targets.
 
@@ -176,6 +192,13 @@ class GraphGateway(Protocol):
         thread_id: str,
     ) -> GraphStateValues:
         """Return the graph state values for a thread."""
+
+    async def get_state_snapshot(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+    ) -> ThreadStateSnapshot:
+        """Return a full state snapshot including checkpoint id, next, and interrupts."""
 
     async def update_state_values(
         self,

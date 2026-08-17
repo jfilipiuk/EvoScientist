@@ -36,6 +36,7 @@ from .types import (
     GraphTarget,
     RunRequest,
     ThreadResolution,
+    ThreadStateSnapshot,
     ThreadStore,
 )
 
@@ -606,6 +607,30 @@ class LangGraphServerGateway:
         thread_id: str,
     ) -> GraphStateValues:
         return await self._get_state_values(thread_id)
+
+    async def get_state_snapshot(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+    ) -> ThreadStateSnapshot:
+        state = await self.thread_store.client.threads.get_state(thread_id)
+        values = state.get("values")
+        if not isinstance(values, dict):
+            values = {}
+        checkpoint = state.get("checkpoint")
+        checkpoint_id = None
+        if isinstance(checkpoint, dict):
+            raw_cp_id = checkpoint.get("checkpoint_id")
+            if isinstance(raw_cp_id, str):
+                checkpoint_id = raw_cp_id
+        next_nodes = state.get("next") or ()
+        interrupts = state.get("interrupts") or ()
+        return ThreadStateSnapshot(
+            values={str(k): v for k, v in values.items()},
+            checkpoint_id=checkpoint_id,
+            next=tuple(next_nodes),
+            interrupts=tuple(interrupts),
+        )
 
     async def update_state_values(
         self,

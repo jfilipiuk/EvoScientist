@@ -13,6 +13,7 @@ from .types import (
     GraphTarget,
     RunRequest,
     ThreadResolution,
+    ThreadStateSnapshot,
     ThreadStore,
 )
 
@@ -184,6 +185,30 @@ class LocalGraphGateway:
         )
         values: GraphStateValues = snapshot.values
         return values
+
+    async def get_state_snapshot(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+    ) -> ThreadStateSnapshot:
+        local_graph = self._require_local_graph(target)
+        snapshot = await local_graph.aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
+        checkpoint_id = None
+        config = getattr(snapshot, "config", None)
+        if isinstance(config, dict):
+            configurable = config.get("configurable", {})
+            if isinstance(configurable, dict):
+                raw_cp_id = configurable.get("checkpoint_id")
+                if isinstance(raw_cp_id, str):
+                    checkpoint_id = raw_cp_id
+        return ThreadStateSnapshot(
+            values=snapshot.values if isinstance(snapshot.values, dict) else {},
+            checkpoint_id=checkpoint_id,
+            next=tuple(snapshot.next) if snapshot.next else (),
+            interrupts=tuple(snapshot.interrupts) if snapshot.interrupts else (),
+        )
 
     async def update_state_values(
         self,

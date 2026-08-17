@@ -147,6 +147,52 @@ async def test_local_graph_gateway_reads_state_values():
     )
 
 
+async def test_local_graph_gateway_get_state_snapshot():
+    from EvoScientist.gateway import ThreadStateSnapshot
+
+    agent = MagicMock()
+    agent.aget_state = AsyncMock(
+        return_value=SimpleNamespace(
+            values={"async_tasks": {"task-1": {}}},
+            next=("model",),
+            interrupts=(),
+            config={"configurable": {"thread_id": "abc12345", "checkpoint_id": "cp-1"}},
+        )
+    )
+    gateway = LocalGraphGateway()
+
+    snapshot = await gateway.get_state_snapshot(
+        GraphTarget(local_graph=agent), "abc12345"
+    )
+
+    assert isinstance(snapshot, ThreadStateSnapshot)
+    assert snapshot.values == {"async_tasks": {"task-1": {}}}
+    assert snapshot.checkpoint_id == "cp-1"
+    assert snapshot.next == ("model",)
+    assert snapshot.interrupts == ()
+
+
+async def test_local_graph_gateway_get_state_snapshot_empty_next():
+    agent = MagicMock()
+    agent.aget_state = AsyncMock(
+        return_value=SimpleNamespace(
+            values={},
+            next=(),
+            interrupts=("interrupt-1",),
+            config={"configurable": {"thread_id": "abc12345"}},
+        )
+    )
+    gateway = LocalGraphGateway()
+
+    snapshot = await gateway.get_state_snapshot(
+        GraphTarget(local_graph=agent), "abc12345"
+    )
+
+    assert snapshot.checkpoint_id is None
+    assert snapshot.next == ()
+    assert snapshot.interrupts == ("interrupt-1",)
+
+
 async def test_local_graph_gateway_updates_state_values():
     agent = MagicMock()
     agent.aupdate_state = AsyncMock()
@@ -709,6 +755,40 @@ async def test_langgraph_server_gateway_reads_state_values():
     values = await gateway.get_state_values(GraphTarget(), "abc12345")
 
     assert values == {"async_tasks": {"task-1": {}}}
+
+
+async def test_langgraph_server_gateway_get_state_snapshot():
+    from EvoScientist.gateway import ThreadStateSnapshot
+
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={
+            "abc12345": {
+                "values": {"async_tasks": {"task-1": {}}},
+                "next": ["model"],
+                "checkpoint": {
+                    "thread_id": "abc12345",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": "cp-server-1",
+                    "checkpoint_map": {},
+                },
+                "interrupts": [],
+            }
+        },
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    snapshot = await gateway.get_state_snapshot(GraphTarget(), "abc12345")
+
+    assert isinstance(snapshot, ThreadStateSnapshot)
+    assert snapshot.values == {"async_tasks": {"task-1": {}}}
+    assert snapshot.checkpoint_id == "cp-server-1"
+    assert snapshot.next == ("model",)
+    assert snapshot.interrupts == ()
 
 
 async def test_langgraph_server_gateway_messages_apply_summarization_event():

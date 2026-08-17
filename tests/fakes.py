@@ -20,6 +20,7 @@ from EvoScientist.gateway import (
     GraphTarget,
     RunRequest,
     ThreadResolution,
+    ThreadStateSnapshot,
     ThreadStore,
 )
 
@@ -299,6 +300,7 @@ class FakeGraphGateway(GraphGateway):
         *,
         stream: FakeStreamFactory | None = None,
         state_values: GraphStateValues | None = None,
+        state_snapshot: ThreadStateSnapshot | None = None,
         state_error: BaseException | None = None,
         generated_thread_ids: Iterable[str] | None = None,
         thread_store: ThreadStore | None = None,
@@ -306,6 +308,7 @@ class FakeGraphGateway(GraphGateway):
         self.events = list(events or [])
         self.stream = stream
         self.state_values = state_values or {}
+        self.state_snapshot = state_snapshot
         self.state_error = state_error
         self.generated_thread_ids = list(generated_thread_ids or [])
         self.thread_store = thread_store or FakeThreadStore()
@@ -410,6 +413,22 @@ class FakeGraphGateway(GraphGateway):
         if self.state_error is not None:
             raise self.state_error
         return self.state_values
+
+    async def get_state_snapshot(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+    ) -> ThreadStateSnapshot:
+        if self.state_error is not None:
+            raise self.state_error
+        if self.state_snapshot is not None:
+            return self.state_snapshot
+        return ThreadStateSnapshot(
+            values=self.state_values,
+            checkpoint_id=None,
+            next=(),
+            interrupts=(),
+        )
 
     async def update_state_values(
         self,
