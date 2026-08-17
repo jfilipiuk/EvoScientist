@@ -441,7 +441,7 @@ class FakeGraphGateway(GraphGateway):
         self,
         target: GraphTarget,
         thread_id: str,
-        values: GraphStateValues,
+        values: GraphStateValues | None,
         *,
         as_node: str | None = None,
         metadata: dict[str, Any] | None = None,
