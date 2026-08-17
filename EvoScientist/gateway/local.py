@@ -138,6 +138,11 @@ class LocalGraphGateway:
         *,
         force: bool = False,
     ) -> bool:
+        # ``force`` is local-only (not on the GraphGateway protocol): the
+        # local path's ``delete_thread`` filters on ``MAIN_THREAD_FILTER_SQL``,
+        # so un-stamped ephemeral clones survive a normal delete. The server
+        # path deletes by thread_id without the filter, so it doesn't need
+        # this.
         if force:
             return await self.thread_store.delete_thread_force(thread_id)
         return await self.thread_store.delete_thread(thread_id)

@@ -322,7 +322,13 @@ class FakeGraphGateway(GraphGateway):
             tuple[str, dict[str, Any] | None, GraphTarget | None]
         ] = []
         self.updated_states: list[
-            tuple[GraphTarget, str, GraphStateValues, str | None, dict[str, Any] | None]
+            tuple[
+                GraphTarget,
+                str,
+                GraphStateValues | None,
+                str | None,
+                dict[str, Any] | None,
+            ]
         ] = []
 
     async def create_thread(
@@ -387,6 +393,8 @@ class FakeGraphGateway(GraphGateway):
         *,
         force: bool = False,
     ) -> bool:
+        if force:
+            return await self.thread_store.delete_thread_force(thread_id)
         return await self.thread_store.delete_thread(thread_id)
 
     async def clone_thread(
@@ -647,7 +655,7 @@ class FakeLangGraphThreadsClient:
     async def update_state(
         self,
         thread_id: str,
-        values: GraphStateValues,
+        values: GraphStateValues | None,
         *,
         as_node: str | None = None,
     ) -> dict[str, Any]:

@@ -768,6 +768,8 @@ async def test_local_graph_gateway_delete_thread_force_bypasses_filter():
     result = await gateway.delete_thread("clone-12345", force=True)
 
     assert result is True
+    assert ("delete_thread_force", "clone-12345") in thread_store.calls
+    assert not any(c[0] == "delete_thread" for c in thread_store.calls)
 
 
 async def test_local_graph_gateway_delete_thread_defaults_to_filtered():
@@ -777,6 +779,8 @@ async def test_local_graph_gateway_delete_thread_defaults_to_filtered():
     result = await gateway.delete_thread("clone-12345")
 
     assert result is True
+    assert ("delete_thread", "clone-12345") in thread_store.calls
+    assert not any(c[0] == "delete_thread_force" for c in thread_store.calls)
 
 
 def test_runtime_gateways_can_use_langgraph_server_backend():

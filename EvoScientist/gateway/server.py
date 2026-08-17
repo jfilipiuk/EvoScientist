@@ -626,7 +626,7 @@ class LangGraphServerGateway:
         next_nodes = state.get("next") or ()
         interrupts = state.get("interrupts") or ()
         return ThreadStateSnapshot(
-            values={str(k): v for k, v in values.items()},
+            values=values,
             checkpoint_id=checkpoint_id,
             next=tuple(next_nodes),
             interrupts=tuple(interrupts),
