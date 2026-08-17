@@ -1102,6 +1102,9 @@ async def delete_thread_force(thread_id: str) -> bool:
         deleted = cur.rowcount > 0
         await conn.commit()
         return deleted
+
+
+async def get_thread_metadata(thread_id: str) -> dict | None:
     """Return metadata dict for *thread_id*, or ``None`` if not found.
 
     Keys: ``workspace_dir``, ``model``, ``updated_at``.
