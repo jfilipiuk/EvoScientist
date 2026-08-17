@@ -717,12 +717,66 @@ async def test_langgraph_server_gateway_clones_thread():
     ]
 
 
-async def test_local_graph_gateway_clone_thread_is_explicitly_unsupported():
-    async def _run():
-        await LocalGraphGateway().clone_thread("source-thread")
+async def test_local_graph_gateway_clone_thread_seeds_source_messages():
+    agent = MagicMock()
+    agent.aupdate_state = AsyncMock()
+    thread_store = FakeThreadStore(
+        generated_thread_id="clone-12345",
+        messages=[HumanMessage(content="hello"), AIMessage(content="hi there")],
+    )
+    gateway = LocalGraphGateway(thread_store=thread_store)
 
-    with pytest.raises(NotImplementedError, match="does not support thread cloning"):
-        await _run()
+    cloned_id = await gateway.clone_thread(
+        "source-thread",
+        target=GraphTarget(local_graph=agent),
+    )
+
+    assert cloned_id == "clone-12345"
+    agent.aupdate_state.assert_awaited_once_with(
+        {"configurable": {"thread_id": "clone-12345"}},
+        {"messages": [HumanMessage(content="hello"), AIMessage(content="hi there")]},
+        as_node="model",
+    )
+
+
+async def test_local_graph_gateway_clone_thread_no_source_messages():
+    agent = MagicMock()
+    agent.aupdate_state = AsyncMock()
+    thread_store = FakeThreadStore(
+        generated_thread_id="clone-empty",
+        messages=[],
+    )
+    gateway = LocalGraphGateway(thread_store=thread_store)
+
+    cloned_id = await gateway.clone_thread(
+        "source-thread",
+        target=GraphTarget(local_graph=agent),
+    )
+
+    assert cloned_id == "clone-empty"
+    agent.aupdate_state.assert_awaited_once_with(
+        {"configurable": {"thread_id": "clone-empty"}},
+        {"messages": []},
+        as_node="model",
+    )
+
+
+async def test_local_graph_gateway_delete_thread_force_bypasses_filter():
+    thread_store = FakeThreadStore(deleted=True)
+    gateway = LocalGraphGateway(thread_store=thread_store)
+
+    result = await gateway.delete_thread("clone-12345", force=True)
+
+    assert result is True
+
+
+async def test_local_graph_gateway_delete_thread_defaults_to_filtered():
+    thread_store = FakeThreadStore(deleted=True)
+    gateway = LocalGraphGateway(thread_store=thread_store)
+
+    result = await gateway.delete_thread("clone-12345")
+
+    assert result is True
 
 
 def test_runtime_gateways_can_use_langgraph_server_backend():

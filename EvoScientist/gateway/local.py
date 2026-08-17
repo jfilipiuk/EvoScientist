@@ -61,6 +61,9 @@ class LocalThreadStore:
     async def delete_thread(self, thread_id: str) -> bool:
         return await session_store.delete_thread(thread_id)
 
+    async def delete_thread_force(self, thread_id: str) -> bool:
+        return await session_store.delete_thread_force(thread_id)
+
 
 @dataclass(slots=True)
 class LocalGraphGateway:
@@ -132,7 +135,11 @@ class LocalGraphGateway:
         self,
         thread_id: str,
         target: GraphTarget | None = None,
+        *,
+        force: bool = False,
     ) -> bool:
+        if force:
+            return await self.thread_store.delete_thread_force(thread_id)
         return await self.thread_store.delete_thread(thread_id)
 
     async def clone_thread(
@@ -142,7 +149,15 @@ class LocalGraphGateway:
         metadata: dict[str, Any] | None = None,
         target: GraphTarget | None = None,
     ) -> str:
-        raise NotImplementedError("LocalGraphGateway does not support thread cloning.")
+        local_graph = self._require_local_graph(target)
+        new_thread_id = self.thread_store.generate_thread_id()
+        source_messages = await self.thread_store.get_thread_messages(source_thread_id)
+        await local_graph.aupdate_state(
+            {"configurable": {"thread_id": new_thread_id}},
+            {"messages": source_messages},
+            as_node="model",
+        )
+        return new_thread_id
 
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         target = request.target

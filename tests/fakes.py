@@ -287,6 +287,11 @@ class FakeThreadStore(ThreadStore):
         self._maybe_raise("delete_thread")
         return self.deleted
 
+    async def delete_thread_force(self, thread_id: str) -> bool:
+        self.calls.append(("delete_thread_force", thread_id))
+        self._maybe_raise("delete_thread_force")
+        return self.deleted
+
 
 FakeStreamFactory = Callable[[RunRequest], AsyncIterator[GraphEvent]]
 
@@ -379,6 +384,8 @@ class FakeGraphGateway(GraphGateway):
         self,
         thread_id: str,
         target: GraphTarget | None = None,
+        *,
+        force: bool = False,
     ) -> bool:
         return await self.thread_store.delete_thread(thread_id)
 

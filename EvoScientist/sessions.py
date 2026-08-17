@@ -1077,7 +1077,31 @@ async def delete_thread(thread_id: str) -> bool:
         return deleted
 
 
-async def get_thread_metadata(thread_id: str) -> dict | None:
+async def delete_thread_force(thread_id: str) -> bool:
+    """Delete ALL checkpoints and writes for *thread_id* without the
+    EvoScientist ``agent_name`` filter.
+
+    Used for ephemeral clone-thread cleanup where the clone's checkpoints
+    were intentionally left un-stamped (no ``agent_name``) to keep them out
+    of ``/sessions`` listings. The standard ``delete_thread`` would refuse
+    those rows because they don't match ``MAIN_THREAD_FILTER_SQL``.
+    """
+    db_path = str(get_db_path())
+    async with aiosqlite.connect(db_path, timeout=30.0) as conn:
+        if not await _table_exists(conn, "checkpoints"):
+            return False
+        if await _table_exists(conn, "writes"):
+            await conn.execute(
+                "DELETE FROM writes WHERE thread_id = ?",
+                (thread_id,),
+            )
+        cur = await conn.execute(
+            "DELETE FROM checkpoints WHERE thread_id = ?",
+            (thread_id,),
+        )
+        deleted = cur.rowcount > 0
+        await conn.commit()
+        return deleted
     """Return metadata dict for *thread_id*, or ``None`` if not found.
 
     Keys: ``workspace_dir``, ``model``, ``updated_at``.
